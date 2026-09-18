@@ -561,7 +561,7 @@ static const char * const epsilon_bindings[] = {
     "M-w", "isearch-yank-word", "isearch",
     "C-y", "isearch-yank-kill", "isearch",
     "M-y", "isearch-yank-line", "isearch",
-    "C-\\", "call-last-kbd-macro", NULL,
+    "C-\\", "copy-from-above-command", NULL,
     "C-x 2", "split-window-above", NULL,
     "C-x 3", "split-window-left", NULL,
     "C-x C-l", "compare-files", NULL,
@@ -583,7 +583,7 @@ static const char * const emacs_bindings[] = {
     "M-w", "isearch-toggle-word-match", "isearch",
     "C-y", "isearch-yank-line", "isearch",
     "M-y", "isearch-yank-kill", "isearch",
-    "C-\\", "toggle-input-method", NULL,
+    "C-\\", "copy-from-above-command", NULL,
     "C-x 2", "split-window-below", NULL,
     "C-x 3", "split-window-right", NULL,
     "C-x C-l", "downcase-region", NULL,
@@ -1011,14 +1011,29 @@ int qe_get_word(EditState *s, char *buf, int buf_size,
     return out->len;
 }
 
+void qe_activate_region(EditState *s)
+{
+    s->region_active = 1;
+    s->region_style = s->qs->hilite_region ? QE_STYLE_REGION_HILITE : 0;
+}
+
+void qe_deactivate_region(EditState *s)
+{
+    s->region_active = 0;
+    s->region_style = 0;
+}
+
 void do_mark_region(EditState *s, int mark, int offset)
 {
     /* CG: Should have local and global mark rings */
     s->b->mark = clamp_offset(mark, 0, s->b->total_size);
     s->offset = clamp_offset(offset, 0, s->b->total_size);
-    /* activate region hilite */
-    if (s->qs->hilite_region)
-        s->region_style = QE_STYLE_REGION_HILITE;
+    qe_activate_region(s);
+}
+
+int qe_region_is_active(EditState *s)
+{
+    return s->region_active && s->b->mark != s->offset;
 }
 
 /*---------------- Case handling ----------------*/
@@ -1071,7 +1086,7 @@ void do_changecase_region(EditState *s, int arg)
     int offset;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     /* WARNING: during case change, the region offsets can change, so
        it is not so simple ! */
@@ -1871,13 +1886,13 @@ int do_delete_selection(EditState *s)
 {
     int res = 0;
 
-    if (s->region_style && s->b->mark != s->offset) {
+    if (qe_region_is_active(s)) {
         /* Delete hilighted region */
         // XXX: make it optional?
         res = eb_delete_range(s->b, s->b->mark, s->offset);
     }
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     return res;
 }
@@ -1899,7 +1914,7 @@ void do_char(EditState *s, int key, int argval) {
     if (s->b->flags & BF_READONLY)
         return;
 
-    if (s->region_style && s->b->mark != s->offset) {
+    if (qe_region_is_active(s)) {
         const char *pairs = "<>[](){}''``\"\"";
         const char *p;
         if (key < 255 && (p = strchr(pairs, key)) != NULL) {
@@ -1988,7 +2003,7 @@ void text_write_char(EditState *s, int key)
 
     /* Highlighted region was deleted by caller */
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     cur_ch = eb_nextc(s->b, s->offset, &endpos);
     len = eb_encode_char32(s->b, buf, key);
@@ -2302,7 +2317,7 @@ void do_tabulate(EditState *s, int argval)
     if (s->b->flags & BF_READONLY)
         return;
 
-    if (s->region_style) {
+    if (qe_region_is_active(s)) {
         do_indent_rigidly_by(s, s->b->mark, offset, indent * argval);
         return;
     }
@@ -2321,7 +2336,7 @@ void do_tabulate(EditState *s, int argval)
 }
 
 static void do_untabulate(EditState *s) {
-    if (s->region_style) {
+    if (qe_region_is_active(s)) {
         /* unindent the whole highlighted region */
         do_indent_rigidly_to_tab_stop(s, s->b->mark, s->offset, -1);
         return;
@@ -2399,7 +2414,7 @@ static void do_unknown_key(EditState *s) {
 
 void do_keyboard_quit(EditState *s)
 {
-    if (s->flags & WF_POPUP && !s->region_style) {
+    if (s->flags & WF_POPUP && !s->region_active) {
         do_popup_exit(s);
         return;
     }
@@ -2410,7 +2425,7 @@ void do_keyboard_quit(EditState *s)
     }
 #endif
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
     /* deactivate search hilite */
     s->isearch_state = NULL;
     s->multi_cursor_active = 0;
@@ -2430,7 +2445,7 @@ void do_set_mark(EditState *s)
 
 void do_maybe_set_mark(EditState *s)
 {
-    if (!s->region_style && is_shift_key(s->qs->last_key)) {
+    if (!s->region_active && is_shift_key(s->qs->last_key)) {
         do_set_mark(s);
     }
 }
@@ -2473,14 +2488,15 @@ void do_append_next_kill(qe__unused__ EditState *s)
     /* do nothing! */
 }
 
-void do_kill(EditState *s, int p1, int p2, int dir, int keep)
+static EditBuffer *do_kill_internal(EditState *s, int p1, int p2, int dir,
+                                    int keep, int whole_lines)
 {
     QEmacsState *qs = s->qs;
-    int len, tmp;
+    int append, len, tmp;
     EditBuffer *b;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     if (p1 > p2) {
         tmp = p1;
@@ -2489,10 +2505,17 @@ void do_kill(EditState *s, int p1, int p2, int dir, int keep)
     }
     len = p2 - p1;
     b = qs->yank_buffers[qs->yank_current];
-    if (!b || !dir || qs->last_cmd_func != (CmdFunc)do_append_next_kill) {
+    append = b && dir && qs->last_cmd_func == (CmdFunc)do_append_next_kill;
+    if (!append) {
         /* append kill if last command was kill already */
         b = qe_new_yank_buffer(qs, s->b);
     }
+    if (!b)
+        return NULL;
+    if (whole_lines && (!append || (b->flags & BF_YANK_WHOLE_LINES)))
+        b->flags |= BF_YANK_WHOLE_LINES;
+    else
+        b->flags &= ~BF_YANK_WHOLE_LINES;
     /* insert at beginning or end depending on kill direction */
     eb_insert_buffer_convert(b, dir < 0 ? 0 : b->total_size, s->b, p1, len);
     if (keep) {
@@ -2512,6 +2535,12 @@ void do_kill(EditState *s, int p1, int p2, int dir, int keep)
         qs->this_cmd_func = (CmdFunc)do_append_next_kill;
     }
     selection_activate(qs->screen);
+    return b;
+}
+
+void do_kill(EditState *s, int p1, int p2, int dir, int keep)
+{
+    do_kill_internal(s, p1, p2, dir, keep, 0);
 }
 
 void do_kill_region(EditState *s) {
@@ -2522,6 +2551,487 @@ void do_copy_region(EditState *s) {
     do_kill(s, s->b->mark, s->offset, 0, 1);
 }
 
+static void do_whole_line_or_region(EditState *s, int n, int keep)
+{
+    EditBuffer *b;
+    int col, count, dir, end, line, start;
+
+    if (qe_region_is_active(s)) {
+        do_kill(s, s->b->mark, s->offset, keep ? 0 : 1, keep);
+        return;
+    }
+
+    eb_get_pos(s->b, &line, &col, s->offset);
+    count = n;
+    dir = n < 0 ? -1 : 1;
+    start = end = eb_goto_bol(s->b, s->offset);
+    if (n < 0) {
+        while (n++ < 0 && start > 0)
+            start = eb_prev_line(s->b, start);
+    } else {
+        while (n-- > 0 && end < s->b->total_size)
+            end = eb_next_line(s->b, end);
+    }
+    if (start == end) {
+        if (count > 0 && start == s->b->total_size
+        &&  (b = do_kill_internal(s, start, end,
+                                  keep ? 0 : dir, keep, 1)) != NULL) {
+            eb_insert_char32(b, b->total_size, '\n');
+        }
+        return;
+    }
+
+    do_kill_internal(s, start, end, keep ? 0 : dir, keep, 1);
+    if (!keep) {
+        eb_get_pos(s->b, &line, &end, s->offset);
+        s->offset = eb_goto_pos(s->b, line, col);
+    }
+}
+
+static void do_kill_region_or_line(EditState *s, int n)
+{
+    do_whole_line_or_region(s, n, 0);
+}
+
+static void do_copy_region_or_line(EditState *s, int n)
+{
+    do_whole_line_or_region(s, n, 1);
+}
+
+static void do_goto_last_change(EditState *s, int arg);
+static void do_goto_last_change_reverse(EditState *s, int arg);
+
+#define MAX_CHANGE_HISTORY_ENTRIES  4096
+
+enum ChangeHistoryState {
+    CHANGE_HISTORY_UNKNOWN,
+    CHANGE_HISTORY_VALID,
+    CHANGE_HISTORY_INVALID,
+};
+
+enum ChangeHistoryResult {
+    CHANGE_HISTORY_FOUND,
+    CHANGE_HISTORY_EMPTY,
+    CHANGE_HISTORY_TRUNCATED,
+    CHANGE_HISTORY_OOM,
+    CHANGE_HISTORY_MALFORMED,
+    CHANGE_HISTORY_ITER_INVALIDATED,
+};
+
+static void clear_change_history_locations(EditState *s)
+{
+    qe_free(&s->change_history_offsets);
+    qe_free(&s->change_history_states);
+    s->change_history_span = 0;
+}
+
+static void clear_change_history_cache(EditState *s)
+{
+    s->change_history_buffer = NULL;
+    qe_free(&s->change_history_entries);
+    clear_change_history_locations(s);
+    s->change_history_count = 0;
+    s->change_history_truncated = 0;
+    s->change_history_revision = 0;
+}
+
+static enum ChangeHistoryResult get_change_log_entries(EditState *s,
+                                                        int *count_ptr)
+{
+    EditBuffer *b = s->b;
+    EditBufferLogEntry entry;
+    EditBufferLogIterator iter;
+    enum EditBufferLogIterResult ret;
+    int count = 0, index = 0, keep, skip;
+
+    if (s->change_history_buffer == b
+    &&  s->change_history_revision == b->log_revision) {
+        *count_ptr = s->change_history_count;
+        return CHANGE_HISTORY_FOUND;
+    }
+    clear_change_history_cache(s);
+
+    eb_log_iter_init(b, &iter);
+    while ((ret = eb_log_iter_next(b, &iter, &entry)) == EB_LOG_ITER_ENTRY) {
+        if (!(entry.flags & (EB_LOG_FLAG_UNDO | EB_LOG_FLAG_UNAPPLIED)))
+            count++;
+    }
+    if (ret != EB_LOG_ITER_END) {
+        return ret == EB_LOG_ITER_INVALIDATED
+            ? CHANGE_HISTORY_ITER_INVALIDATED : CHANGE_HISTORY_MALFORMED;
+    }
+
+    keep = min_int(count, MAX_CHANGE_HISTORY_ENTRIES);
+    if (keep && !(s->change_history_entries =
+                  qe_malloc_array(EditBufferLogEntry, keep))) {
+        return CHANGE_HISTORY_OOM;
+    }
+    skip = count - keep;
+    eb_log_iter_init(b, &iter);
+    while ((ret = eb_log_iter_next(b, &iter, &entry)) == EB_LOG_ITER_ENTRY) {
+        if (entry.flags & (EB_LOG_FLAG_UNDO | EB_LOG_FLAG_UNAPPLIED))
+            continue;
+        if (skip) {
+            skip--;
+            continue;
+        }
+        s->change_history_entries[index++] = entry;
+    }
+    if (ret != EB_LOG_ITER_END) {
+        clear_change_history_cache(s);
+        return ret == EB_LOG_ITER_INVALIDATED
+            ? CHANGE_HISTORY_ITER_INVALIDATED : CHANGE_HISTORY_MALFORMED;
+    }
+    s->change_history_buffer = b;
+    s->change_history_count = index;
+    s->change_history_truncated = count > keep;
+    s->change_history_revision = b->log_revision;
+    *count_ptr = index;
+    return CHANGE_HISTORY_FOUND;
+}
+
+static int prepare_change_history_locations(EditState *s, int span)
+{
+    int count = s->change_history_count;
+
+    if (s->change_history_states && s->change_history_span == span)
+        return 0;
+    clear_change_history_locations(s);
+    if (count) {
+        s->change_history_offsets = qe_malloc_array(int, count);
+        s->change_history_states = qe_mallocz_array(u8, count);
+        if (!s->change_history_offsets || !s->change_history_states) {
+            clear_change_history_locations(s);
+            return -1;
+        }
+    }
+    s->change_history_span = span;
+    return 0;
+}
+
+static int project_change_history_location(EditState *s, int index, int span)
+{
+    EditBufferLogEntry *entries = s->change_history_entries;
+    int j;
+    int64_t adj, p1, p2, pos;
+
+    if (s->change_history_states[index] != CHANGE_HISTORY_UNKNOWN)
+        return s->change_history_states[index] == CHANGE_HISTORY_VALID;
+
+    pos = (int64_t)entries[index].offset
+        + (entries[index].op == LOGOP_DELETE ? 0 : entries[index].size);
+    for (j = index + 1; j < s->change_history_count; j++) {
+        EditBufferLogEntry *e = &entries[j];
+
+        p1 = e->offset;
+        p2 = p1 + (e->op == LOGOP_INSERT ? 0 : e->size);
+        adj = e->op == LOGOP_INSERT ? e->size
+            : e->op == LOGOP_DELETE ? -e->size : 0;
+        if (pos <= p1 - span) {
+            continue;
+        } else
+        if (pos > p2 + span) {
+            pos += adj;
+        } else
+        if (span == 0) {
+            pos = p1;
+        } else {
+            s->change_history_states[index] = CHANGE_HISTORY_INVALID;
+            return 0;
+        }
+    }
+    s->change_history_offsets[index] =
+        pos < 0 ? 0 : pos > s->b->total_size ? s->b->total_size : pos;
+    s->change_history_states[index] = CHANGE_HISTORY_VALID;
+    return 1;
+}
+
+static enum ChangeHistoryResult
+find_change_offset(EditState *s, int depth, int direction, int span,
+                   int *depth_ptr, int *offset_ptr,
+                   EditBufferLogEntry *found)
+{
+    EditBufferLogEntry *entries;
+    enum ChangeHistoryResult ret;
+    int count, i;
+
+    ret = get_change_log_entries(s, &count);
+    if (ret != CHANGE_HISTORY_FOUND)
+        return ret;
+    if (count == 0)
+        return CHANGE_HISTORY_EMPTY;
+    if (prepare_change_history_locations(s, span) < 0)
+        return CHANGE_HISTORY_OOM;
+    entries = s->change_history_entries;
+
+    for (i = count - depth; i >= 0 && i < count; i -= direction) {
+        if (project_change_history_location(s, i, span)) {
+            *depth_ptr = count - i;
+            *offset_ptr = s->change_history_offsets[i];
+            if (found)
+                *found = entries[i];
+            return CHANGE_HISTORY_FOUND;
+        }
+    }
+    if (direction > 0 && s->change_history_truncated)
+        return CHANGE_HISTORY_TRUNCATED;
+    return CHANGE_HISTORY_EMPTY;
+}
+
+static void goto_last_change(EditState *s, int arg, int default_direction)
+{
+    EditBufferLogEntry entry;
+    QEmacsState *qs = s->qs;
+    enum ChangeHistoryResult ret;
+    int depth, direction, new_sequence, offset, span;
+
+    direction = default_direction;
+    if (arg != NO_ARG) {
+        if (arg < 0)
+            direction = -direction;
+    }
+    new_sequence = s->last_change_buffer != s->b
+        || s->last_change_revision != s->b->log_revision
+        || (qs->last_cmd_func != (CmdFunc)do_goto_last_change
+            && qs->last_cmd_func != (CmdFunc)do_goto_last_change_reverse);
+    if (new_sequence) {
+        if (direction < 0) {
+            s->last_change_buffer = NULL;
+            s->last_change_revision = 0;
+            s->last_change_depth = 0;
+            put_error(s, "Cannot reverse as the first operation");
+            return;
+        }
+        s->last_change_buffer = s->b;
+        s->last_change_revision = s->b->log_revision;
+        s->last_change_depth = 0;
+        if (qs->last_cmd_modified
+        &&  qs->last_cmd_buffer == s->b
+        &&  (qs->last_change_cmd_func == (CmdFunc)do_char
+             || qs->last_change_cmd_func == (CmdFunc)do_yank)
+        &&  find_change_offset(s, 1, 1, 0, &depth, &offset, NULL)
+                == CHANGE_HISTORY_FOUND
+        &&  offset == s->offset) {
+            s->last_change_depth = depth;
+        }
+    }
+    span = arg != NO_ARG ? abs(arg)
+        : new_sequence ? 8 : s->last_change_span;
+    s->last_change_span = span;
+    depth = s->last_change_depth + direction;
+    if (depth < 1) {
+        put_error(s, "No later change info");
+        return;
+    }
+    ret = find_change_offset(s, depth, direction, span,
+                             &depth, &offset, &entry);
+    if (ret != CHANGE_HISTORY_FOUND) {
+        switch (ret) {
+        case CHANGE_HISTORY_TRUNCATED:
+            put_error(s, "Older change history is not cached");
+            break;
+        case CHANGE_HISTORY_OOM:
+            put_error(s, "Out of memory for change history");
+            break;
+        case CHANGE_HISTORY_MALFORMED:
+            put_error(s, "Malformed change history");
+            break;
+        case CHANGE_HISTORY_ITER_INVALIDATED:
+            put_error(s, "Change history changed; retry");
+            break;
+        default:
+            put_error(s, direction > 0
+                      ? "No further change info" : "No later change info");
+            break;
+        }
+        return;
+    }
+    s->last_change_depth = depth;
+    qe_deactivate_region(s);
+    s->multi_cursor_active = 0;
+    s->offset = offset;
+    if (span == 0) {
+        put_status(s, "%s %d byte%s",
+                   entry.op == LOGOP_INSERT ? "Inserted" :
+                   entry.op == LOGOP_DELETE ? "Deleted" : "Changed",
+                   entry.size, entry.size == 1 ? "" : "s");
+    }
+}
+
+static void do_goto_last_change(EditState *s, int arg)
+{
+    goto_last_change(s, arg, 1);
+}
+
+static void do_goto_last_change_reverse(EditState *s, int arg)
+{
+    goto_last_change(s, arg, -1);
+}
+
+static EditBuffer *copy_to_temporary_buffer(EditState *s, int start, int end)
+{
+    EditBuffer *b = qe_new_buffer(s->qs, "*copy*", BF_SYSTEM);
+
+    if (b) {
+        eb_set_charset(b, s->b->charset, s->b->eol_type);
+        if (s->b->flags & BF_STYLES)
+            eb_create_style_buffer(b, s->b->flags);
+        eb_insert_buffer_convert(b, 0, s->b, start, end - start);
+    }
+    return b;
+}
+
+static void do_duplicate(EditState *s, int n)
+{
+    EditBuffer *b;
+    int copy_size, end, i, line_mode, start;
+
+    if (n <= 0 || (s->b->flags & BF_READONLY))
+        return;
+    if (s->interactive) {
+        put_error(s, "duplicate is not supported in interactive buffers");
+        return;
+    }
+
+    line_mode = !qe_region_is_active(s);
+    if (line_mode) {
+        start = eb_goto_bol(s->b, s->offset);
+        end = eb_next_line(s->b, start);
+    } else {
+        start = min_offset(s->b->mark, s->offset);
+        end = max_offset(s->b->mark, s->offset);
+    }
+    b = copy_to_temporary_buffer(s, start, end);
+    if (!b)
+        return;
+    if (line_mode)
+        qe_deactivate_region(s);
+
+    s->b->last_log = LOGOP_FREE;
+    if (line_mode && end == s->b->total_size) {
+        if (end == start) {
+            eb_insert_char32(b, 0, '\n');
+        } else
+        if (eb_prevc(s->b, end, &i) != '\n') {
+            end += eb_insert_char32(s->b, end, '\n');
+            eb_insert_char32(b, b->total_size, '\n');
+        }
+    }
+    copy_size = b->total_size;
+    for (i = 0; i < n; i++)
+        end += eb_insert_buffer_convert(s->b, end, b, 0, b->total_size);
+    s->offset += copy_size;
+    if (!line_mode)
+        s->b->mark += copy_size;
+    qe_kill_buffer(s->qs, b);
+}
+
+static int get_visual_column(EditBuffer *b, int start, int end)
+{
+    int col = 0, offset, offset1, tw;
+    char32_t c;
+
+    tw = b->tab_width > 0 ? b->tab_width : DEFAULT_TAB_WIDTH;
+    for (offset = start; offset < end; offset = offset1) {
+        c = eb_nextc(b, offset, &offset1);
+        if (c == '\t')
+            col += tw - col % tw;
+        else
+            col += max_int(0, qe_wcwidth(c));
+    }
+    return col;
+}
+
+static int offset_at_visual_column(EditBuffer *b, int start, int end,
+                                   int target, int *spaces)
+{
+    int col = 0, next_col, offset, offset1, tw;
+    char32_t c;
+
+    *spaces = 0;
+    tw = b->tab_width > 0 ? b->tab_width : DEFAULT_TAB_WIDTH;
+    for (offset = start; offset < end; offset = offset1) {
+        if (col >= target)
+            return offset;
+        c = eb_nextc(b, offset, &offset1);
+        if (c == '\t') {
+            next_col = col + tw - col % tw;
+            if (next_col > target) {
+                *spaces = next_col - target;
+                return offset1;
+            }
+        } else {
+            next_col = col + max_int(0, qe_wcwidth(c));
+            if (next_col > target)
+                return offset;
+        }
+        if (next_col >= target)
+            return offset1;
+        col = next_col;
+    }
+    return end;
+}
+
+static void do_copy_from_above(EditState *s, int n)
+{
+    EditBuffer *b;
+    int bol, c, end, offset, offset1, spaces, start, target;
+
+    if (s->b->flags & BF_READONLY)
+        return;
+    if (s->interactive) {
+        put_error(s, "copy-from-above is not supported in interactive buffers");
+        return;
+    }
+    if (s->multi_cursor_active) {
+        put_error(s, "copy-from-above is not supported with multiple cursors");
+        return;
+    }
+    if (n != NO_ARG && n <= 0)
+        return;
+
+    bol = eb_goto_bol(s->b, s->offset);
+    target = get_visual_column(s->b, bol, s->offset);
+    start = bol;
+    for (;;) {
+        if (start <= 0) {
+            put_error(s, "No nonblank line above");
+            return;
+        }
+        start = eb_prev_line(s->b, start);
+        end = eb_goto_eol(s->b, start);
+        for (offset = start; offset < end; offset = offset1) {
+            c = eb_nextc(s->b, offset, &offset1);
+            if (!qe_isblank(c))
+                break;
+        }
+        if (offset < end)
+            break;
+    }
+
+    start = offset_at_visual_column(s->b, start, end, target, &spaces);
+    if (n != NO_ARG) {
+        if (spaces > n)
+            spaces = n;
+        n -= spaces;
+        for (offset = start; n-- > 0 && offset < end; offset = offset1)
+            eb_nextc(s->b, offset, &offset1);
+        end = offset;
+    }
+    b = copy_to_temporary_buffer(s, start, end);
+    if (!b)
+        return;
+    if (!spaces && !b->total_size) {
+        qe_kill_buffer(s->qs, b);
+        return;
+    }
+    qe_deactivate_region(s);
+    s->b->last_log = LOGOP_FREE;
+    s->offset += eb_insert_char32_n(s->b, s->offset, ' ', spaces);
+    s->offset += eb_insert_buffer_convert(s->b, s->offset, b, 0, b->total_size);
+    qe_kill_buffer(s->qs, b);
+}
+
 void do_kill_line(EditState *s, int argval)
 {
     int p1, p2, offset1, dir = 1;
@@ -2530,7 +3040,7 @@ void do_kill_line(EditState *s, int argval)
     // XXX: can there be a variable and a function with the same name?
     p1 = s->offset;
     if (argval == NO_ARG) {
-        if (s->region_style && s->b->mark != s->offset) {
+        if (qe_region_is_active(s)) {
             /* kill highlighted region */
             p1 = s->b->mark;
             p2 = s->offset;
@@ -2619,12 +3129,17 @@ void do_yank(EditState *s) {
          the n-th element of the kill-ring
        qemacs: with a C-u prefix, yank n copies of the last killed block
      */
-    int size;
+    int col = 0, line, size, start, whole_lines;
     QEmacsState *qs = s->qs;
     EditBuffer *b;
 
     if (s->b->flags & BF_READONLY)
         return;
+
+    /* same region test as do_delete_selection below, and never yank
+       whole lines in the minibuffer */
+    whole_lines = !qe_region_is_active(s)
+        && !(s->flags & WF_MINIBUF);
 
     /* First delete any highlighted range */
     do_delete_selection(s);
@@ -2634,12 +3149,34 @@ void do_yank(EditState *s) {
 
     s->b->mark = s->offset;
     b = qs->yank_buffers[qs->yank_current];
+    whole_lines = whole_lines && b && (b->flags & BF_YANK_WHOLE_LINES);
+    if (whole_lines) {
+        eb_get_pos(s->b, &line, &col, s->offset);
+        s->offset = eb_goto_bol(s->b, s->offset);
+    }
+    start = s->offset;
     if (b) {
         size = b->total_size;
+        /* strip the newline of a whole line kill in the minibuffer */
+        if ((s->flags & WF_MINIBUF) && size > 0
+        &&  eb_prevc(b, size, &line) == '\n') {
+            size = line;
+        }
         if (size > 0) {
             s->b->last_log = LOGOP_FREE;
             s->offset += eb_insert_buffer_convert(s->b, s->offset, b, 0, size);
+            if (whole_lines && eb_prevc(b, size, &line) != '\n')
+                s->offset += eb_insert_char32(s->b, s->offset, '\n');
         }
+    }
+    s->b->mark = start;
+    s->last_yank_start = start;
+    s->last_yank_end = s->offset;
+    qs->last_yank_window = s;
+    qs->last_yank_buffer = s->b;
+    if (whole_lines) {
+        eb_get_pos(s->b, &line, &size, s->offset);
+        s->offset = eb_goto_pos(s->b, line, col);
     }
     qs->this_cmd_func = (CmdFunc)do_yank;
 }
@@ -2648,12 +3185,19 @@ void do_yank_pop(EditState *s)
 {
     QEmacsState *qs = s->qs;
 
-    if (qs->last_cmd_func != (CmdFunc)do_yank) {
+    if (s->multi_cursor_active) {
+        put_error(s, "yank-pop is not supported with multiple cursors");
+        return;
+    }
+    if (qs->last_cmd_func != (CmdFunc)do_yank
+    ||  qs->last_cmd_buffer != s->b
+    ||  qs->last_yank_window != s
+    ||  qs->last_yank_buffer != s->b) {
         put_error(s, "Previous command was not a yank");
         return;
     }
 
-    eb_delete_range(s->b, s->b->mark, s->offset);
+    eb_delete_range(s->b, s->last_yank_start, s->last_yank_end);
 
     if (--qs->yank_current < 0) {
         /* get last yank buffer, yank ring may not be full */
@@ -5567,7 +6111,9 @@ static void generic_text_display(EditState *s)
 }
 
 typedef struct ExecCmdState {
+    QEmacsState *qs;
     EditState *s;
+    EditBuffer *buffer;
     const CmdDef *d;
     int nb_args;
     int has_arg;
@@ -5836,7 +6382,9 @@ void exec_command(EditState *s, const CmdDef *d, int argval, int key)
     if (!es)
         return;
 
+    es->qs = qs;
     es->s = s;
+    es->buffer = s->b;
     es->d = d;
     if (argval == NO_ARG) {
         es->has_arg = 0;
@@ -5857,6 +6405,51 @@ void exec_command(EditState *s, const CmdDef *d, int argval, int key)
     save_buffers_request_completed = 0;
 
     parse_arguments(es);
+}
+
+void qe_command_begin(QEmacsState *qs, EditState *s, CmdFunc func,
+                      QECommandSnapshot *snapshot)
+{
+    qs->this_cmd_func = func;
+    snapshot->window = s;
+    snapshot->buffer = s->b;
+    snapshot->change_count = s->b->change_count;
+    snapshot->serial = qs->command_serial;
+}
+
+void qe_command_record_change(QEmacsState *qs, EditState *s,
+                              EditBuffer *buffer, uint64_t change_count,
+                              CmdFunc completed_func)
+{
+    qs->last_change_cmd_func = completed_func;
+    if (s && s->b == buffer) {
+        qs->last_cmd_buffer = buffer;
+        qs->last_cmd_modified = buffer->change_count != change_count;
+    } else {
+        qs->last_cmd_buffer = NULL;
+        qs->last_cmd_modified = 0;
+    }
+}
+
+void qe_command_complete(QEmacsState *qs,
+                         const QECommandSnapshot *snapshot)
+{
+    EditBuffer *b = snapshot->buffer;
+    EditState *s = snapshot->window;
+    int nested = qs->command_serial != snapshot->serial;
+
+    /* Nested dispatch already completed and recorded the effective command. */
+    if (!nested)
+        qs->completed_cmd_func = qs->this_cmd_func;
+    qs->command_serial++;
+    if (!nested) {
+        qe_check_window(qs, &s);
+        qe_check_buffer(qs, &b);
+        qe_command_record_change(qs, s, b,
+                                 snapshot->change_count,
+                                 qs->completed_cmd_func);
+    }
+    qs->last_cmd_func = qs->this_cmd_func;
 }
 
 static void cmd_save_buffer_key(QEmacsState *qs, void *opaque, int ch)
@@ -5927,18 +6520,37 @@ static void cmd_save_buffer_confirm_cb(void *opaque, char *reply, CompletionDef 
     qe_free(&reply);
 }
 
+static EditState *exec_cmd_target(ExecCmdState *es)
+{
+    EditState *s = es->s;
+
+    if (!qe_check_window(es->qs, &s) || s->b != es->buffer)
+        return NULL;
+    es->s = s;
+    es->args[0].s = s;
+    return s;
+}
+
 /* parse as much arguments as possible. ask value to user if possible */
 static void parse_arguments(ExecCmdState *es)
 {
-    EditState *s = es->s;
+    QEmacsState *qs = es->qs;
+    EditState *s = exec_cmd_target(es);
     EditBuffer *this_buffer;
-    QEmacsState *qs = s->qs;
+    QECommandSnapshot command;
     QErrorContext ec;
     const CmdDef *d = es->d;
     CmdArg *argp;
     CmdArgSpec cas;
     int ret, rep_count, get_arg, type;
     int elapsed_time;
+
+    if (!s) {
+        if (qs->key_ctx.grab_key_opaque == es)
+            qe_ungrab_keys(qs);
+        put_error(qs->active_window, "Command target no longer exists");
+        goto fail;
+    }
 
     while ((ret = parse_arg(&es->ptype, &cas)) != 0) {
         if (ret < 0 || es->nb_args >= MAX_CMD_ARGS)
@@ -6064,7 +6676,7 @@ static void parse_arguments(ExecCmdState *es)
     }
     // XXX: reset es->argval?
 
-    qs->this_cmd_func = d->action.func;
+    qe_command_begin(qs, s, d->action.func, &command);
     qs->cmd_start_time = get_clock_ms();
 
     while (rep_count --> 0) {
@@ -6118,7 +6730,7 @@ static void parse_arguments(ExecCmdState *es)
     if (s && elapsed_time >= 100)
         put_status(s, "|%s: %dms", d->name, elapsed_time);
 
-    qs->last_cmd_func = qs->this_cmd_func;
+    qe_command_complete(qs, &command);
  fail:
     free_cmd(&es);
 }
@@ -6146,6 +6758,7 @@ static void free_cmd(ExecCmdState **esp)
 static void arg_edit_cb(void *opaque, char *str, CompletionDef *completion)
 {
     ExecCmdState *es = opaque;
+    EditState *s;
     int index, val;
     const char *p;
 
@@ -6156,16 +6769,20 @@ static void arg_edit_cb(void *opaque, char *str, CompletionDef *completion)
         free_cmd(&es);
         return;
     }
+    if (!(s = exec_cmd_target(es))) {
+        put_error(es->qs->active_window, "Command target no longer exists");
+        goto fail;
+    }
     index = es->nb_args - 1;
     switch (es->args_type[index]) {
     case CMD_ARG_INT:
         if (completion && completion->convert_entry) {
-            val = completion->convert_entry(es->s, str, &p);
+            val = completion->convert_entry(s, str, &p);
         } else {
             val = strtol_c(str, &p, 0);
         }
         if (*p != '\0') {
-            put_error(es->s, "Invalid number: %s", str);
+            put_error(s, "Invalid number: %s", str);
             goto fail;
         }
         es->args[index].n = val;
@@ -6382,7 +6999,7 @@ void do_start_kbd_macro(EditState *s)
        Use `end-kbd-macro` (bound to `C-x )`) to finish recording and
        make the macro available.
        Use `name-last-kbd-macro` to give it a permanent name.
-       Use `call-last-kbd-macro` (bound to `C-x e` or `C-\`) to replay
+       Use `call-last-kbd-macro` (bound to `C-x e`) to replay
        the keystrokes.
      */
     QEmacsState *qs = s->qs;
@@ -6866,7 +7483,7 @@ static void qe_free_multi_cursor(EditState *s) {
 static void do_activate_multi_cursor(EditState *s) {
     if (s->multi_cursor_active)
         return;
-    if (s->region_style) {
+    if (qe_region_is_active(s)) {
         int start_line, start_col, end_line, end_col, line;
         int start = min_int(s->b->mark, s->offset);
         int end = max_int(s->b->mark, s->offset);
@@ -6879,7 +7496,7 @@ static void do_activate_multi_cursor(EditState *s) {
             qe_add_multi_cursor_position(s, pos);
         }
         // TODO: need some way of rendering multi-line cursor
-        s->region_style = 0;
+        qe_deactivate_region(s);
         s->offset = start;
     }
     if (s->multi_cursor_len) {
@@ -7164,6 +7781,8 @@ static void qe_key_process(QEmacsState *qs, int key)
             int argval = c->argval;
             int multi_cursor_active = s->multi_cursor_active;
             EditBuffer *this_buffer = s->b;
+            uint64_t change_count = this_buffer->change_count;
+            uint64_t command_serial = qs->command_serial;
 
             if (c->has_arg & HAS_ARG_NEGATIVE)
                 argval = -argval;
@@ -7231,6 +7850,13 @@ static void qe_key_process(QEmacsState *qs, int key)
                         s->multi_cursor_active = 0;
                     }
                 }
+            }
+            /* Do not overwrite nested or still-pending command state. */
+            if (qs->command_serial == command_serial + 1
+            ||  (multi_cursor_active
+                 && qs->command_serial != command_serial)) {
+                qe_command_record_change(qs, s, this_buffer, change_count,
+                                         qs->completed_cmd_func);
             }
         }
         if (qs->defining_macro) {
@@ -7474,12 +8100,13 @@ EditState *qe_find_file_window(QEmacsState *qs, const char *filename)
 
 void switch_to_buffer(EditState *s, EditBuffer *b)
 {
+    QEmacsState *qs = s->qs;
     EditBuffer *b0 = s->b;
     EditState *e;
     ModeDef *mode;
 
     /* remove region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     if (b == b0)
         return;
@@ -7525,7 +8152,10 @@ void switch_to_buffer(EditState *s, EditBuffer *b)
                 memset(s, 0, SAVED_DATA_SIZE);
                 mode = b->default_mode;
                 /* <default> default values */
-                s->indent_width = s->qs->default_tab_width;
+                s->indent_width = qs->default_indent_width > 0 ?
+                                  qs->default_indent_width :
+                                  DEFAULT_INDENT_WIDTH;
+                s->indent_tabs_mode = qs->default_indent_tabs_mode;
                 s->default_style = QE_STYLE_DEFAULT;
                 s->wrap = mode ? mode->default_wrap : WRAP_AUTO;
             }
@@ -7709,11 +8339,18 @@ void edit_close(EditState **sp)
         edit_detach(s);
         if (s->qs->key_ctx.grab_key_opaque == s)
             s->qs->key_ctx.grab_key_opaque = NULL;
+        if (s->qs->last_yank_window == s) {
+            s->qs->last_yank_window = NULL;
+            s->qs->last_yank_buffer = NULL;
+        }
         /* closing the window mode should have freed it already */
         qe_free_mode_data(s->mode_data);
         qe_free(&s->prompt);
         qe_free(&s->caption);
         qe_free(&s->line_shadow);
+        qe_free(&s->change_history_entries);
+        qe_free(&s->change_history_offsets);
+        qe_free(&s->change_history_states);
 #ifndef CONFIG_TINY
         qe_free_multi_cursor(s);
 #endif
@@ -8188,24 +8825,25 @@ static void do_minibuffer_electric_key(EditState *s, int key, int argval) {
 
 static void do_minibuffer_electric_yank(EditState *s) {
     MinibufState *mb = minibuffer_get_state(s, 0);
-    int stop = s->b->total_size;
-    int offset;
+    int offset, start;
     char32_t c;
 
     do_yank(s);
+    start = s->last_yank_start;
 
     /* erase beginning of line if yanking absolute path after / */
-    if (mb && mb->completion && (mb->completion->flags & CF_FILENAME)
+    if (start > 0 && s->last_yank_end > start
+    &&  mb && mb->completion && (mb->completion->flags & CF_FILENAME)
     &&  ((c = eb_nextc(s->b, 0, &offset)) == '/' || c == '~')) {
-        c = eb_prevc(s->b, stop, &offset);
+        c = eb_prevc(s->b, start, &offset);
         if (c == '/') {
             /* check for absolute path */
-            if (eb_match_char32(s->b, stop, '/', NULL)
-            ||  eb_match_char32(s->b, stop, '~', NULL)
-            ||  eb_match_str_utf8(s->b, stop, "http://", NULL)
-            ||  eb_match_str_utf8(s->b, stop, "https://", NULL)
-            ||  eb_match_str_utf8(s->b, stop, "ftp://", NULL)) {
-                eb_delete(s->b, 0, stop);
+            if (eb_match_char32(s->b, start, '/', NULL)
+            ||  eb_match_char32(s->b, start, '~', NULL)
+            ||  eb_match_str_utf8(s->b, start, "http://", NULL)
+            ||  eb_match_str_utf8(s->b, start, "https://", NULL)
+            ||  eb_match_str_utf8(s->b, start, "ftp://", NULL)) {
+                eb_delete(s->b, 0, start);
             }
         }
     }
@@ -8374,6 +9012,7 @@ static void do_minibuffer_get_binary(EditState *s)
 void do_minibuffer_exit(EditState *s, int do_abort)
 {
     char buf[4096], *retstr;
+    QEmacsState *qs = s->qs;
     MinibufState *mb;
     CompletionDef *completion;
     StringArray *hist;
@@ -8451,10 +9090,12 @@ void do_minibuffer_exit(EditState *s, int do_abort)
 
     /* Force status update and call the callback */
     if (do_abort) {
-        put_error(target, "Canceled.");
+        if (qe_check_window(qs, &target))
+            put_error(target, "Canceled.");
         (*cb)(opaque, NULL, NULL);
     } else {
-        put_status(target, "!");
+        if (qe_check_window(qs, &target))
+            put_status(target, "!");
         retstr = qe_strdup(buf);
         (*cb)(opaque, retstr, completion);
     }
@@ -9735,7 +10376,7 @@ void do_write_region(EditState *s, const char *filename)
     char absname[MAX_FILENAME_SIZE];
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     canonicalize_absolute_path(s, absname, sizeof(absname), filename);
     put_save_message(s, filename,
@@ -10896,9 +11537,7 @@ static void qe_save_selection(QEmacsState *qs, int copy)
         if (e != NULL && copy) {
             qe_trace_bytes(qs, "copy-region", -1, EB_TRACE_COMMAND);
             do_copy_region(e);
-            /* activate region hilite */
-            if (qs->hilite_region)
-                e->region_style = QE_STYLE_REGION_HILITE;
+            qe_activate_region(e);
         }
     }
 }
@@ -10980,7 +11619,7 @@ static int check_mouse_event(EditState *e, QEEvent *ev) {
                 goto no_handler;
             qe_save_selection(qs, FALSE);
             e->show_selection = 0;
-            e->region_style = 0;
+            qe_deactivate_region(e);
             call_mouse_goto(e, mouse_x - e->xleft, mouse_y - e->ytop, ev);
             qs->motion_type = MOTION_TEXT;
             qs->motion_target = e;
@@ -11329,6 +11968,8 @@ static int generic_mode_init(EditState *s)
     // XXX: should track insertions at s->offset?
     eb_add_callback(s->b, eb_offset_callback, &s->offset, 0);
     eb_add_callback(s->b, eb_offset_callback, &s->offset_top, 0);
+    eb_add_callback(s->b, eb_offset_callback, &s->last_yank_start, 1);
+    eb_add_callback(s->b, eb_offset_callback, &s->last_yank_end, 0);
     set_colorize_mode(s, NULL);
     return 0;
 }
@@ -11359,6 +12000,12 @@ static void generic_mode_close(EditState *s)
     set_colorize_mode(s, NULL);
     eb_free_callback(s->b, eb_offset_callback, &s->offset);
     eb_free_callback(s->b, eb_offset_callback, &s->offset_top);
+    eb_free_callback(s->b, eb_offset_callback, &s->last_yank_start);
+    eb_free_callback(s->b, eb_offset_callback, &s->last_yank_end);
+    if (s->qs->last_yank_window == s) {
+        s->qs->last_yank_window = NULL;
+        s->qs->last_yank_buffer = NULL;
+    }
 
     /* Should free CRCs when switching display modes */
     qe_free(&s->line_shadow);
@@ -11782,6 +12429,12 @@ static const CmdDef basic_commands[] = {
     CMD2( "forward-word", "M-f, C-right, M-right, C-S-right, M-S-right",
           "Move to the end of the word on or after point",
           do_word_left_right, ESi, "p")
+    CMD2( "goto-last-change", "M-p",
+          "Go to the most recent edit, or an older edit when repeated",
+          do_goto_last_change, ESi, "P")
+    CMD2( "goto-last-change-reverse", "M-n",
+          "Go back toward more recent edits after goto-last-change",
+          do_goto_last_change_reverse, ESi, "P")
     CMD1( "scroll-down", "M-v, pageup, S-pageup",
           "Display the previous page",
           do_scroll_up_down, -2) /* u? */
@@ -11848,12 +12501,18 @@ static const CmdDef basic_commands[] = {
           "Kill to the end of the word at or after point",
           do_kill_word, ESi, "p")
     /* XXX: should take region as argument, implicit from keyboard */
-    CMD0( "kill-region", "C-w",
-          "Kill the current region",
-          do_kill_region)
-    CMD0( "copy-region", "M-w",
-          "Copy the current region to the kill ring",
-          do_copy_region)
+    CMD2( "kill-region", "C-w",
+          "Kill the current region, or whole lines if the region is inactive",
+          do_kill_region_or_line, ESi, "p")
+    CMD2( "copy-region", "M-w",
+          "Copy the current region, or whole lines if the region is inactive",
+          do_copy_region_or_line, ESi, "p")
+    CMD2( "duplicate-dwim", "M-\\",
+          "Duplicate the current region or line",
+          do_duplicate, ESi, "*" "p")
+    CMD2( "copy-from-above-command", "C-\\",
+          "Copy text from the nearest nonblank line above",
+          do_copy_from_above, ESi, "*" "P")
     CMD2( "yank", "C-y",
           "Insert the contents of the current entry in the kill ring",
           do_yank, ES, "*")
@@ -11982,7 +12641,7 @@ static const CmdDef basic_commands[] = {
     CMD0( "end-kbd-macro", "C-x )",
           "End recording a keyboard macro",
           do_end_kbd_macro)
-    CMD2( "call-last-kbd-macro", "C-x e, C-\\",
+    CMD2( "call-last-kbd-macro", "C-x e",
           "Run the last recorded keyboard macro",
           do_call_last_kbd_macro, ESi, "p")
     CMD2( "define-kbd-macro", "",
@@ -12431,7 +13090,7 @@ static CompletionDef charset_completion = {
 /* init function */
 static int qe_init(QEmacsState *qs, int argc, char **argv)
 {
-    EditState *s;
+    EditState *s, *scratch_window;
     EditBuffer *b;
     QEDisplay *dpy;
     int i, _optind;
@@ -12457,8 +13116,10 @@ static int qe_init(QEmacsState *qs, int argc, char **argv)
     qs->column_number_mode = 1;
     qs->shell_mode_auto_interactive = 1;
     qs->shell_command_other_window = 1;
+    qs->backup_inhibited = 1;
 
     qs->default_tab_width = DEFAULT_TAB_WIDTH;
+    qs->default_indent_width = DEFAULT_INDENT_WIDTH;
     qs->default_fill_column = DEFAULT_FILL_COLUMN;
     qs->mmap_threshold = MIN_MMAP_SIZE;
     qs->max_load_size = MAX_LOAD_SIZE;
@@ -12534,6 +13195,7 @@ static int qe_init(QEmacsState *qs, int argc, char **argv)
     s = qe_new_window(b, 0, 0, 0, 0, WF_MODELINE);
     if (!s)
         return 2;
+    scratch_window = s;
 
     /* at this stage, no screen is defined. Initialize a
      * null display driver to have a consistent state
@@ -12547,6 +13209,15 @@ static int qe_init(QEmacsState *qs, int argc, char **argv)
     /* load config file unless command line option given */
     if (!no_init_file) {
         do_load_config_file(s, NULL);
+        if (qe_check_window(qs, &scratch_window)
+        &&  scratch_window->b == b) {
+            b->tab_width = qs->default_tab_width;
+            b->fill_column = qs->default_fill_column;
+            scratch_window->indent_width = qs->default_indent_width > 0 ?
+                                           qs->default_indent_width :
+                                           DEFAULT_INDENT_WIDTH;
+            scratch_window->indent_tabs_mode = qs->default_indent_tabs_mode;
+        }
         s = qs->active_window;
     }
 

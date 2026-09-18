@@ -3252,7 +3252,7 @@ static void shell_maybe_toggle_interactive(EditState *e)
     ShellState *s = shell_get_state(e, 1);
 
     /* optionally restore shell interactive mode if point is at end */
-    if (!e->interactive && !e->region_style
+    if (!e->interactive && !qe_region_is_active(e)
     &&  e->qs->shell_mode_auto_interactive
     &&  s && (s->shell_flags & SF_INTERACTIVE) && !s->grab_keys) {
         if (e->offset >= e->b->total_size && e->offset >= s->cur_offset) {
@@ -3581,6 +3581,8 @@ static void do_shell_kill_beginning_of_line(EditState *s, int argval)
 
 static void do_shell_yank(EditState *e)
 {
+    e->qs->last_yank_window = NULL;
+    e->qs->last_yank_buffer = NULL;
     if (e->interactive) {
         /* yank from kill-ring and insert via shell_write_char().
          * This will cause a deadlock if kill buffer contents is too

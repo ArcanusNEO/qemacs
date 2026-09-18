@@ -28,8 +28,32 @@
 #include <sys/mman.h>
 #endif
 
-static void eb_addlog(EditBuffer *b, enum LogOperation op,
-                      int offset, int size);
+enum {
+    SAVELOG_ENABLED = 1,
+    SAVELOG_DISABLED = 2,
+    SAVELOG_UNDO = 4,
+};
+
+/* Private serialized header. Records are followed by optional data and an int
+ * containing the data size. */
+typedef struct LogBuffer {
+    u8 pad;
+    u8 op;
+    u8 was_modified;
+    u8 flags;
+    int offset;
+    int size;
+} LogBuffer;
+
+static void eb_addlog_flags(EditBuffer *b, enum LogOperation op,
+                            int offset, int size, unsigned int flags);
+
+static void eb_addlog(EditBuffer *b, enum LogOperation op, int offset, int size)
+{
+    unsigned int flags = (b->save_log & SAVELOG_UNDO) ? EB_LOG_FLAG_UNDO : 0;
+
+    eb_addlog_flags(b, op, offset, size, flags);
+}
 
 /************************************************************/
 /* basic access to the edit buffer */
@@ -661,7 +685,10 @@ void eb_free_log_buffer(EditBuffer *b)
     eb_free(&b->log_buffer);
     b->log_new_index = 0;
     b->log_current = 0;
+    b->undo_change_count = b->change_count;
     b->nb_logs = 0;
+    b->last_log = LOGOP_FREE;
+    b->log_revision++;
 }
 
 /* rename a buffer: modify name to ensure uniqueness */
@@ -800,9 +827,36 @@ void eb_free(EditBuffer **bp)
 {
     if (*bp) {
         EditBuffer *b = *bp;
+        EditState *e;
         QEmacsState *qs = b->qs;
         EditBuffer **pb;
         EditBuffer *b1;
+
+        for (e = qs->first_window; e; e = e->next_window) {
+            if (e->last_buffer == b)
+                e->last_buffer = NULL;
+            if (e->last_change_buffer == b) {
+                e->last_change_buffer = NULL;
+                e->last_change_revision = 0;
+                e->last_change_depth = 0;
+            }
+            if (e->change_history_buffer == b) {
+                e->change_history_buffer = NULL;
+                qe_free(&e->change_history_entries);
+                qe_free(&e->change_history_offsets);
+                qe_free(&e->change_history_states);
+                e->change_history_count = 0;
+                e->change_history_revision = 0;
+            }
+        }
+        if (qs->last_cmd_buffer == b) {
+            qs->last_cmd_buffer = NULL;
+            qs->last_cmd_modified = 0;
+        }
+        if (qs->last_yank_buffer == b) {
+            qs->last_yank_window = NULL;
+            qs->last_yank_buffer = NULL;
+        }
 
         // XXX should use qe_free_mode_data()
         /* free b->mode_data_list by calling destructors */
@@ -1150,15 +1204,132 @@ void eb_style_callback(EditBuffer *b, void *opaque, int arg,
 /************************************************************/
 /* undo buffer */
 
-static void eb_addlog(EditBuffer *b, enum LogOperation op,
-                      int offset, int size)
+static int eb_log_read_record(EditBuffer *b, int index, int limit,
+                              LogBuffer *lb, int *next_index)
+{
+    int data_size, trailer;
+    int64_t trailer_index, next;
+
+    if (!b->log_buffer || index < 0 || limit < 0 || index > limit
+    ||  limit > b->log_buffer->total_size
+    ||  limit - index < (int)(sizeof(*lb) + sizeof(trailer))
+    ||  eb_read(b->log_buffer, index, lb, sizeof(*lb)) != sizeof(*lb)
+    ||  lb->op < LOGOP_WRITE || lb->op > LOGOP_DELETE
+    ||  lb->was_modified > 1 || (lb->flags & ~EB_LOG_FLAG_UNDO)
+    ||  lb->offset < 0 || lb->size < 0)
+        return -1;
+
+    data_size = lb->op == LOGOP_INSERT ? 0 : lb->size;
+    trailer_index = (int64_t)index + sizeof(*lb) + data_size;
+    next = trailer_index + sizeof(trailer);
+    if (next > limit
+    ||  eb_read(b->log_buffer, trailer_index, &trailer,
+                sizeof(trailer)) != sizeof(trailer)
+    ||  trailer != data_size)
+        return -1;
+
+    *next_index = next;
+    return 0;
+}
+
+static int eb_log_count_records(EditBuffer *b, int start, int end)
+{
+    LogBuffer lb;
+    int count = 0, next;
+
+    while (start < end) {
+        if (eb_log_read_record(b, start, end, &lb, &next) < 0)
+            return -1;
+        start = next;
+        count++;
+    }
+    return start == end ? count : -1;
+}
+
+static int eb_log_read_previous(EditBuffer *b, int end,
+                                LogBuffer *lb, int *index_ptr)
+{
+    int data_size, index, next;
+
+    if (end < (int)(sizeof(*lb) + sizeof(data_size))
+    ||  eb_read(b->log_buffer, end - sizeof(data_size),
+                &data_size, sizeof(data_size)) != sizeof(data_size)
+    ||  data_size < 0
+    ||  data_size > end - (int)(sizeof(*lb) + sizeof(data_size)))
+        return -1;
+    index = end - sizeof(data_size) - data_size - sizeof(*lb);
+    if (eb_log_read_record(b, index, end, lb, &next) < 0 || next != end)
+        return -1;
+    *index_ptr = index;
+    return 0;
+}
+
+static int eb_log_truncate_redo(EditBuffer *b)
+{
+    int removed, truncate_index;
+
+    if (!b->log_current)
+        return 0;
+    truncate_index = b->log_current - 1;
+    removed = eb_log_count_records(b, truncate_index, b->log_new_index);
+    if (removed < 0)
+        return -1;
+    eb_delete(b->log_buffer, truncate_index,
+              b->log_new_index - truncate_index);
+    b->log_new_index = truncate_index;
+    b->log_current = 0;
+    b->nb_logs -= removed;
+    b->last_log = LOGOP_FREE;
+    b->log_revision++;
+    return 0;
+}
+
+void eb_log_iter_init(EditBuffer *b, EditBufferLogIterator *iter)
+{
+    iter->offset = 0;
+    iter->applied_limit = b->log_current ? b->log_current - 1
+                                        : b->log_new_index;
+    iter->revision = b->log_revision;
+}
+
+enum EditBufferLogIterResult eb_log_iter_next(EditBuffer *b,
+                                              EditBufferLogIterator *iter,
+                                              EditBufferLogEntry *entry)
+{
+    LogBuffer lb;
+    int next;
+
+    if (iter->revision != b->log_revision)
+        return EB_LOG_ITER_INVALIDATED;
+    if (iter->offset == b->log_new_index)
+        return EB_LOG_ITER_END;
+    if (iter->offset < 0 || iter->offset > b->log_new_index
+    ||  eb_log_read_record(b, iter->offset, b->log_new_index,
+                           &lb, &next) < 0)
+        return EB_LOG_ITER_MALFORMED;
+
+    entry->op = lb.op;
+    entry->offset = lb.offset;
+    entry->size = lb.size;
+    entry->was_modified = lb.was_modified;
+    entry->flags = lb.flags;
+    if (iter->offset >= iter->applied_limit)
+        entry->flags |= EB_LOG_FLAG_UNAPPLIED;
+    iter->offset = next;
+    return EB_LOG_ITER_ENTRY;
+}
+
+static void eb_addlog_flags(EditBuffer *b, enum LogOperation op,
+                            int offset, int size, unsigned int flags)
 {
     int was_modified, len, size_trailer;
     LogBuffer lb;
     EditBufferCallbackList *l;
 
+    b->change_count++;
+
     /* callbacks and logging disabled for composite undo phase */
-    if (b->save_log & 2)
+    if (b->save_log & SAVELOG_DISABLED)
         return;
 
     /* call each callback */
@@ -1170,7 +1341,7 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
     b->modified = 1;
     b->mtime = get_clock_ms();
 
-    if (!b->save_log)
+    if (!(b->save_log & SAVELOG_ENABLED))
         return;
 
     if (!b->log_buffer) {
@@ -1186,24 +1357,35 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
             return;
         b->log_new_index = 0;
         b->log_current = 0;
+        b->undo_change_count = b->change_count;
         b->last_log = 0;
         b->last_log_char = 0;
         b->nb_logs = 0;
+        b->log_revision++;
+    }
+
+    if (b->log_current && !(flags & EB_LOG_FLAG_UNDO)) {
+        if (eb_log_truncate_redo(b) < 0) {
+            eb_free_log_buffer(b);
+            return;
+        }
     }
     /* XXX: better test to limit size */
-    if (b->nb_logs >= (NB_LOGS_MAX-1)) {
+    /* Undo inverses are temporary and must keep their original record for
+     * redo.  They may briefly grow the physical log beyond NB_LOGS_MAX. */
+    if (!(flags & EB_LOG_FLAG_UNDO)
+    &&  b->nb_logs >= (NB_LOGS_MAX - 1)) {
         /* no free space, delete least recent entry */
-        /* XXX: should check undo record integrity */
-        eb_read(b->log_buffer, 0, &lb, sizeof(lb));
-        len = lb.size;
-        if (lb.op == LOGOP_INSERT)
-            len = 0;
-        len += sizeof(LogBuffer) + sizeof(int);
+        if (eb_log_read_record(b, 0, b->log_new_index, &lb, &len) < 0) {
+            eb_free_log_buffer(b);
+            return;
+        }
         eb_delete(b->log_buffer, 0, len);
         b->log_new_index -= len;
         if (b->log_current > 1)
             b->log_current -= len;
         b->nb_logs--;
+        b->log_revision++;
     }
 
     /* If inserting, try and coalesce log record with previous */
@@ -1213,11 +1395,13 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
                 sizeof(int)) == sizeof(int)
     &&  size_trailer == 0
     &&  eb_read(b->log_buffer, b->log_new_index - sizeof(lb) - sizeof(int), &lb,
-                sizeof(lb)) == sizeof(lb)
+                 sizeof(lb)) == sizeof(lb)
     &&  lb.op == LOGOP_INSERT
+    &&  lb.flags == flags
     &&  lb.offset + lb.size == offset) {
         lb.size += size;
         eb_write(b->log_buffer, b->log_new_index - sizeof(lb) - sizeof(int), &lb, sizeof(lb));
+        b->log_revision++;
         return;
     }
 
@@ -1226,9 +1410,9 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
     /* XXX: should check undo record integrity */
 
     /* header */
-    lb.pad1 = '\n';   /* make log buffer display readable */
-    lb.pad2 = ':';
+    lb.pad = '\n';   /* make log buffer display readable */
     lb.op = op;
+    lb.flags = flags;
     lb.offset = offset;
     lb.size = size;
     lb.was_modified = was_modified;
@@ -1252,36 +1436,44 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
     b->log_new_index += sizeof(int);
 
     b->nb_logs++;
+    b->log_revision++;
 }
 
 void do_undo(EditState *s)
 {
     QEmacsState *qs = s->qs;
     EditBuffer *b = s->b;
-    int log_index, size_trailer;
+    int log_end, log_index, saved_log;
     LogBuffer lb;
 
     if (!b->log_buffer) {
         put_error(s, "No undo information");
         return;
     }
+    if (!(b->save_log & SAVELOG_ENABLED)
+    ||  (b->save_log & SAVELOG_DISABLED)) {
+        put_error(s, "Undo logging is disabled");
+        return;
+    }
 
     /* deactivate region hilite and multi-cursor */
-    s->region_style = 0;
+    qe_deactivate_region(s);
     s->multi_cursor_active = 0;
 
-    /* Should actually keep undo state current until new logs are added */
-    if (qs->last_cmd_func != (CmdFunc)do_undo
-    &&  qs->last_cmd_func != (CmdFunc)do_redo) {
-        b->log_current = 0;
+    if (b->log_current && b->change_count != b->undo_change_count) {
+        if (eb_log_truncate_redo(b) < 0) {
+            eb_free_log_buffer(b);
+            put_error(s, "Malformed undo information");
+            return;
+        }
     }
 
     if (b->log_current == 0) {
-        log_index = b->log_new_index;
+        log_end = b->log_new_index;
     } else {
-        log_index = b->log_current - 1;
+        log_end = b->log_current - 1;
     }
-    if (log_index == 0) {
+    if (log_end == 0) {
         put_error(s, "No further undo information");
         return;
     } else {
@@ -1294,43 +1486,50 @@ void do_undo(EditState *s)
         qe_register_transient_binding(qs, "redo", "r");
     }
 
-    /* go backward */
-    log_index -= sizeof(int);
-    eb_read(b->log_buffer, log_index, &size_trailer, sizeof(int));
-    log_index -= size_trailer + sizeof(LogBuffer);
+    if (eb_log_read_previous(b, log_end, &lb, &log_index) < 0
+    ||  (lb.flags & EB_LOG_FLAG_UNDO)) {
+        eb_free_log_buffer(b);
+        put_error(s, "Malformed undo information");
+        return;
+    }
 
     /* log_current is 1 + index to have zero as default value */
     b->log_current = log_index + 1;
 
     /* play the log entry */
-    eb_read(b->log_buffer, log_index, &lb, sizeof(LogBuffer));
     log_index += sizeof(LogBuffer);
 
     b->last_log = 0;  /* prevent log compression */
 
     switch (lb.op) {
     case LOGOP_WRITE:
-        /* we must disable the log because we want to record a single
-           write (we should have the single operation: eb_write_buffer) */
-        b->save_log |= 2;
+        /* Capture the replacement bytes before restoring the old ones. */
+        eb_addlog_flags(b, LOGOP_WRITE, lb.offset, lb.size,
+                        EB_LOG_FLAG_UNDO);
+        saved_log = b->save_log;
+        b->save_log = saved_log | SAVELOG_DISABLED;
         eb_delete(b, lb.offset, lb.size);
         eb_insert_buffer(b, lb.offset, b->log_buffer, log_index, lb.size);
-        b->save_log &= ~2;
-        eb_addlog(b, LOGOP_WRITE, lb.offset, lb.size);
+        b->save_log = saved_log;
         s->offset = lb.offset + lb.size;
         break;
     case LOGOP_DELETE:
         /* we must also disable the log there because the log buffer
            would be modified BEFORE we insert it by the implicit
            eb_addlog */
-        b->save_log |= 2;
+        saved_log = b->save_log;
+        b->save_log = saved_log | SAVELOG_DISABLED;
         eb_insert_buffer(b, lb.offset, b->log_buffer, log_index, lb.size);
-        b->save_log &= ~2;
-        eb_addlog(b, LOGOP_INSERT, lb.offset, lb.size);
+        b->save_log = saved_log;
+        eb_addlog_flags(b, LOGOP_INSERT, lb.offset, lb.size,
+                        EB_LOG_FLAG_UNDO);
         s->offset = lb.offset + lb.size;
         break;
     case LOGOP_INSERT:
+        saved_log = b->save_log;
+        b->save_log = saved_log | SAVELOG_UNDO;
         eb_delete(b, lb.offset, lb.size);
+        b->save_log = saved_log;
         s->offset = lb.offset;
         break;
     default:
@@ -1338,26 +1537,34 @@ void do_undo(EditState *s)
     }
 
     b->modified = lb.was_modified;
+    b->undo_change_count = b->change_count;
 }
 
 void do_redo(EditState *s)
 {
     EditBuffer *b = s->b;
-    int log_index, size_trailer;
-    LogBuffer lb;
+    int inverse_index, log_index, next, removed, saved_log;
+    LogBuffer inverse, lb;
 
     if (!b->log_buffer) {
         put_error(s, "No undo information");
         return;
     }
+    if (!(b->save_log & SAVELOG_ENABLED)
+    ||  (b->save_log & SAVELOG_DISABLED)) {
+        put_error(s, "Undo logging is disabled");
+        return;
+    }
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
-    /* Should actually keep undo state current until new logs are added */
-    if (s->qs->last_cmd_func != (CmdFunc)do_undo
-    &&  s->qs->last_cmd_func != (CmdFunc)do_redo) {
-        b->log_current = 0;
+    if (b->log_current && b->change_count != b->undo_change_count) {
+        if (eb_log_truncate_redo(b) < 0) {
+            eb_free_log_buffer(b);
+            put_error(s, "Malformed undo information");
+            return;
+        }
     }
 
     if (!b->log_current || !b->log_new_index) {
@@ -1368,51 +1575,58 @@ void do_redo(EditState *s)
 
     /* go forward in undo stack */
     log_index = b->log_current - 1;
-    eb_read(b->log_buffer, log_index, &lb, sizeof(LogBuffer));
-    log_index += sizeof(LogBuffer);
-    if (lb.op != LOGOP_INSERT)
-        log_index += lb.size;
-    log_index += sizeof(int);
+    if (eb_log_read_record(b, log_index, b->log_new_index, &lb, &next) < 0
+    ||  eb_log_read_previous(b, b->log_new_index,
+                             &inverse, &inverse_index) < 0
+    ||  (lb.flags & EB_LOG_FLAG_UNDO) || next > inverse_index
+    ||  !(inverse.flags & EB_LOG_FLAG_UNDO)
+    ||  inverse.offset != lb.offset || inverse.size != lb.size
+    ||  (lb.op == LOGOP_WRITE && inverse.op != LOGOP_WRITE)
+    ||  (lb.op == LOGOP_INSERT && inverse.op != LOGOP_DELETE)
+    ||  (lb.op == LOGOP_DELETE && inverse.op != LOGOP_INSERT)) {
+        eb_free_log_buffer(b);
+        put_error(s, "Malformed undo information");
+        return;
+    }
     /* log_current is 1 + index to have zero as default value */
-    b->log_current = log_index + 1;
-
-    /* go backward from the end and remove undo record */
-    log_index = b->log_new_index;
-    log_index -= sizeof(int);
-    eb_read(b->log_buffer, log_index, &size_trailer, sizeof(int));
-    log_index -= size_trailer + sizeof(LogBuffer);
+    b->log_current = next + 1;
 
     /* play the log entry */
-    eb_read(b->log_buffer, log_index, &lb, sizeof(LogBuffer));
-    log_index += sizeof(LogBuffer);
+    lb = inverse;
+    log_index = inverse_index + sizeof(LogBuffer);
 
     switch (lb.op) {
     case LOGOP_WRITE:
         /* we must disable the log because we want to record a single
            write (we should have the single operation: eb_write_buffer) */
-        b->save_log |= 2;
+        saved_log = b->save_log;
+        b->save_log = saved_log | SAVELOG_DISABLED;
         eb_delete(b, lb.offset, lb.size);
         eb_insert_buffer(b, lb.offset, b->log_buffer, log_index, lb.size);
-        b->save_log &= ~3;
-        eb_addlog(b, LOGOP_WRITE, lb.offset, lb.size);
-        b->save_log |= 1;
+        b->save_log = saved_log & ~(SAVELOG_ENABLED | SAVELOG_DISABLED);
+        eb_addlog_flags(b, LOGOP_WRITE, lb.offset, lb.size,
+                        EB_LOG_FLAG_UNDO);
+        b->save_log = saved_log;
         s->offset = lb.offset + lb.size;
         break;
     case LOGOP_DELETE:
         /* we must also disable the log there because the log buffer
            would be modified BEFORE we insert it by the implicit
            eb_addlog */
-        b->save_log |= 2;
+        saved_log = b->save_log;
+        b->save_log = saved_log | SAVELOG_DISABLED;
         eb_insert_buffer(b, lb.offset, b->log_buffer, log_index, lb.size);
-        b->save_log &= ~3;
-        eb_addlog(b, LOGOP_INSERT, lb.offset, lb.size);
-        b->save_log |= 1;
+        b->save_log = saved_log & ~(SAVELOG_ENABLED | SAVELOG_DISABLED);
+        eb_addlog_flags(b, LOGOP_INSERT, lb.offset, lb.size,
+                        EB_LOG_FLAG_UNDO);
+        b->save_log = saved_log;
         s->offset = lb.offset + lb.size;
         break;
     case LOGOP_INSERT:
-        b->save_log &= ~1;
+        saved_log = b->save_log;
+        b->save_log = saved_log & ~(SAVELOG_ENABLED | SAVELOG_DISABLED);
         eb_delete(b, lb.offset, lb.size);
-        b->save_log |= 1;
+        b->save_log = saved_log;
         s->offset = lb.offset;
         break;
     default:
@@ -1421,14 +1635,23 @@ void do_redo(EditState *s)
 
     b->modified = lb.was_modified;
 
-    log_index -= sizeof(LogBuffer);
-    eb_delete(b->log_buffer, log_index, b->log_new_index - log_index);
-    b->log_new_index = log_index;
+    removed = eb_log_count_records(b, inverse_index, b->log_new_index);
+    if (removed < 0) {
+        eb_free_log_buffer(b);
+        put_error(s, "Malformed undo information");
+        return;
+    }
+    eb_delete(b->log_buffer, inverse_index,
+              b->log_new_index - inverse_index);
+    b->log_new_index = inverse_index;
+    b->nb_logs -= removed;
+    b->log_revision++;
 
-    if (b->log_current >= log_index + 1) {
+    if (b->log_current >= inverse_index + 1) {
         /* redone everything */
         b->log_current = 0;
     }
+    b->undo_change_count = b->change_count;
 }
 
 /************************************************************/
@@ -2146,8 +2369,10 @@ static int raw_buffer_load(EditBuffer *b, FILE *f)
 
 #ifdef CONFIG_MMAP
     if (st.st_size >= b->qs->mmap_threshold) {
-        if (!eb_mmap_buffer(b, b->filename))
+        if (!eb_mmap_buffer(b, b->filename)) {
+            eb_addlog(b, LOGOP_INSERT, 0, b->total_size);
             return 0;
+        }
     }
 #endif
     if (st.st_size <= b->qs->max_load_size) {

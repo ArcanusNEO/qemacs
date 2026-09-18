@@ -1041,6 +1041,12 @@ static int qe_cfg_assign(QEmacsDataSource *ds, QEValue *sp, int op) {
     if (strequal(sp->u.str, "default-tab-width")) {
         ds->s->qs->default_tab_width = sp[1].u.value;
     } else
+    if (strequal(sp->u.str, "default-indent-width")) {
+        ds->s->qs->default_indent_width = sp[1].u.value;
+    } else
+    if (strequal(sp->u.str, "default-indent-tabs-mode")) {
+        ds->s->qs->default_indent_tabs_mode = sp[1].u.value;
+    } else
     if (strequal(sp->u.str, "indent-tabs-mode")) {
         ds->s->indent_tabs_mode = sp[1].u.value;
     } else
@@ -1128,6 +1134,7 @@ static void qe_cfg_free_args(QEmacsDataSource *ds, int nb_args,
 
 static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
     EditState *s = ds->s;
+    QECommandSnapshot command;
     QEmacsState *qs = s->qs;
     const char *r;
     int nb_args, sep, i, ret;
@@ -1245,11 +1252,11 @@ static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
         return -1;
     }
 
-    qs->this_cmd_func = d->action.func;
+    qe_command_begin(qs, s, d->action.func, &command);
     qs->ec.function = d->name;
     call_func(d->sig, d->action, nb_args, args, args_type);
+    qe_command_complete(qs, &command);
     qs->ec.function = NULL;
-    qs->last_cmd_func = qs->this_cmd_func;
     if (qs->active_window)
         s = qs->active_window;
     qe_check_window(qs, &s);
@@ -1437,7 +1444,7 @@ static int do_eval_buffer_region(EditState *s, int start, int stop, int argval) 
 }
 
 void do_eval_region(EditState *s, int argval) {
-    s->region_style = 0;  /* deactivate region hilite */
+    qe_deactivate_region(s);
 
     do_eval_buffer_region(s, s->b->mark, s->offset, argval);
 }

@@ -902,12 +902,31 @@ static int normalize_indent(EditState *s, int offset, int indent)
     return offset;
 }
 
-/* Check if line starts with a label or a switch case */
-static int c_line_has_label(EditState *s, const char32_t *buf, int len,
-                            const QETermStyle *sbuf)
+static int c_indent_flavor(EditState *s)
+{
+    ModeDef *mode = s->colorize_mode ? s->colorize_mode : s->mode;
+
+    return mode ? mode->colorize_flags & CLANG_FLAVOR : CLANG_C;
+}
+
+static int c_line_is_comment_only(const char32_t *buf, int len,
+                                  const QETermStyle *sbuf)
+{
+    int i;
+
+    for (i = 0; i < len; i++) {
+        if (!qe_isblank(buf[i]) && sbuf[i] != C_STYLE_COMMENT)
+            return 0;
+    }
+    return i != 0;
+}
+
+/* Check if line starts with a label, switch case or C++ access specifier. */
+static int c_line_has_label(const char32_t *buf, int len,
+                            const QETermStyle *sbuf, int flavor)
 {
     char kbuf[64];
-    int i, style;
+    int i, klen, style;
 
     i = cp_skip_blanks(buf, 0, len);
 
@@ -918,11 +937,141 @@ static int c_line_has_label(EditState *s, const char32_t *buf, int len,
     ||  style == C_STYLE_PREPROCESS)
         return 0;
 
-    i += get_c_identifier(kbuf, countof(kbuf), 0, buf, i, len, CLANG_C);
+    klen = get_c_identifier(kbuf, countof(kbuf), 0, buf, i, len, flavor);
+    if (!klen)
+        return 0;
+    i += klen;
     if (style == C_STYLE_KEYWORD && strfind("case|default", kbuf))
         return 1;
     i = cp_skip_blanks(buf, i, len);
-    return (buf[i] == ':');
+    if (buf[i] != ':' || (i + 1 < len && buf[i + 1] == ':'))
+        return 0;
+    if (style == C_STYLE_KEYWORD && strfind("private|protected|public", kbuf))
+        return flavor == CLANG_CPP;
+    return 1;
+}
+
+/* Check for a return type or declaration specifiers on a line by itself. */
+static int c_line_is_decl_prefix(const char32_t *buf, int len,
+                                 const QETermStyle *sbuf, int flavor)
+{
+    int i, evidence = 0, seen = 0;
+
+    for (i = cp_skip_blanks(buf, 0, len); i < len;) {
+        int style;
+        char kbuf[64];
+
+        if (qe_isblank(buf[i])) {
+            i++;
+            continue;
+        }
+        style = sbuf[i];
+        if (style == C_STYLE_COMMENT) {
+            while (i < len && sbuf[i] == C_STYLE_COMMENT)
+                i++;
+            continue;
+        }
+        if (qe_findchar("*&:<>,", buf[i])) {
+            i++;
+            continue;
+        }
+        if (!is_c_identifier_start(buf[i], flavor))
+            return 0;
+        i += get_c_identifier(kbuf, countof(kbuf), 0, buf, i, len, flavor);
+        if (style == C_STYLE_KEYWORD
+        &&  strfind("break|case|catch|continue|default|do|else|for|goto|if|"
+                    "return|sizeof|switch|throw|try|while",
+                    kbuf)) {
+            return 0;
+        }
+        if (style == C_STYLE_TYPE
+        ||  strfind("_Alignas|_Atomic|_Noreturn|_Thread_local|alignas|auto|"
+                    "class|const|consteval|constexpr|constinit|enum|explicit|"
+                    "decltype|extern|friend|inline|mutable|register|restrict|static|"
+                    "struct|template|thread_local|typedef|typename|union|"
+                    "using|virtual|volatile",
+                    kbuf)) {
+            evidence = 1;
+        }
+        if (strfind("_Alignas|_Atomic|alignas|decltype|typeof|__typeof__", kbuf)) {
+            int depth = 0;
+
+            i = cp_skip_blanks(buf, i, len);
+            if (i >= len || buf[i] != '(')
+                return 0;
+            do {
+                if (sbuf[i] != C_STYLE_COMMENT) {
+                    if (buf[i] == '(')
+                        depth++;
+                    else
+                    if (buf[i] == ')')
+                        depth--;
+                }
+                i++;
+            } while (i < len && depth > 0);
+            if (depth)
+                return 0;
+        }
+        seen = 1;
+    }
+    return seen && evidence;
+}
+
+/* Check for a possibly qualified function name at the start of a line. */
+static int c_line_has_function(const char32_t *buf, int len,
+                               const QETermStyle *sbuf, int flavor)
+{
+    int destructor_seen = 0, i, operator_seen = 0;
+
+    i = cp_skip_blanks(buf, 0, len);
+    if (i >= len || buf[i] == '.'
+    ||  (buf[i] == '-' && i + 1 < len && buf[i + 1] == '>'))
+        return 0;
+    for (; i < len;) {
+        char kbuf[64];
+        int j, next, start = i, styled_function = 0;
+
+        if (sbuf[i] == C_STYLE_COMMENT) {
+            i++;
+            continue;
+        }
+        if (sbuf[i] == C_STYLE_STRING
+        ||  sbuf[i] == C_STYLE_STRING_Q)
+            return 0;
+        if (qe_findchar(";{", buf[i]))
+            return 0;
+        if (buf[i] == '=' && !operator_seen)
+            return 0;
+        if (buf[i] == '(')
+            return operator_seen;
+        if (buf[i] == '~') {
+            destructor_seen = 1;
+            i++;
+            continue;
+        }
+        if (!is_c_identifier_start(buf[i], flavor)) {
+            i++;
+            continue;
+        }
+        i += get_c_identifier(kbuf, countof(kbuf), 0, buf, i, len, flavor);
+        if (strfind("if|for|while|switch|catch|sizeof", kbuf))
+            return 0;
+        if (strequal(kbuf, "operator") || strend(kbuf, "::operator", NULL)) {
+            operator_seen = 1;
+            continue;
+        }
+        for (j = start; j < i; j++) {
+            if (sbuf[j] == C_STYLE_FUNCTION) {
+                styled_function = 1;
+                break;
+            }
+        }
+        next = cp_skip_blanks(buf, i, len);
+        if (next < len && buf[next] == '('
+        &&  (styled_function || destructor_seen || strstr(kbuf, "::")))
+            return 1;
+    }
+    return 0;
 }
 
 /* indent a line of C code starting at <offset> */
@@ -946,7 +1095,9 @@ void c_indent_line(EditState *s, int offset0)
     QEColorizeContext cp[1];
     int offset, offset1, offsetl, pos, line_num, col_num;
     int i, eoi_found, len, pos1, lpos, style, line_num1, state;
-    int off, found_comma, has_else;
+    int off, found_assignment, found_comma, has_else, block_keyword;
+    int previous_decl_prefix, decl_prefix_indent;
+    int decl_prefix_chain, flavor;
     char32_t c;
     //int found_semi = 0;
     char32_t stack[MAX_STACK_SIZE];
@@ -954,6 +1105,7 @@ void c_indent_line(EditState *s, int offset0)
     int stack_ptr;
 
     cp_initialize(cp, s);
+    flavor = c_indent_flavor(s);
 
     /* find start of line */
     eb_get_pos(s->b, &line_num, &col_num, offset0);
@@ -964,7 +1116,10 @@ void c_indent_line(EditState *s, int offset0)
     lpos = -1; /* position of the last instruction start */
     offsetl = offset;
     eoi_found = 0;
-    found_comma = has_else = 0;
+    found_assignment = found_comma = has_else = block_keyword = 0;
+    previous_decl_prefix = 0;
+    decl_prefix_indent = -1;
+    decl_prefix_chain = 0;
     stack_ptr = 0;
     state = INDENT_NORM;
     for (;;) {
@@ -978,10 +1133,31 @@ void c_indent_line(EditState *s, int offset0)
         pos1 = find_indent1(s, cp->buf);
         /* ignore empty and preprocessor lines */
         // XXX: what if preprocessor directive is indented?
-        if (pos1 == len || cp->sbuf[0] == C_STYLE_PREPROCESS)
+        if (pos1 == len || cp->sbuf[0] == C_STYLE_PREPROCESS) {
+            decl_prefix_chain = 0;
             continue;
-        if (c_line_has_label(s, cp->buf, len, cp->sbuf)) {
-            pos1 = pos1 - s->qs->c_label_indent + s->indent_width;
+        }
+        /* Comments do not interrupt a declaration split across lines. */
+        if (c_line_is_comment_only(cp->buf, len, cp->sbuf))
+            continue;
+        {
+            int has_label = c_line_has_label(cp->buf, len, cp->sbuf, flavor);
+            int is_decl_prefix = !has_label
+                && c_line_is_decl_prefix(cp->buf, len, cp->sbuf, flavor);
+
+            if (decl_prefix_indent < 0) {
+                previous_decl_prefix = is_decl_prefix;
+                decl_prefix_indent = pos1;
+                decl_prefix_chain = is_decl_prefix;
+            } else
+            if (decl_prefix_chain) {
+                if (is_decl_prefix)
+                    decl_prefix_indent = pos1;
+                else
+                    decl_prefix_chain = 0;
+            }
+            if (has_label)
+                pos1 = pos1 - s->qs->c_label_indent + s->indent_width;
         }
         /* scan the line from end to start */
         for (off = len; off-- > 0;) {
@@ -1023,6 +1199,10 @@ void c_indent_line(EditState *s, int offset0)
                     }
                     *q = '\0';
 
+                    if (strfind("if|for|while|do|switch|foreach|else|try|catch|"
+                                "finally|synchronized",
+                                kbuf))
+                        block_keyword = 1;
                     if (!eoi_found && strfind("if|for|while|do|switch|foreach", kbuf)) {
                         pos = pos1 + s->indent_width;
                         goto end_parse;
@@ -1097,12 +1277,10 @@ void c_indent_line(EditState *s, int offset0)
                         found_comma = 1;
                     }
                     break;
-                //case '=':
-                    // if (p[1] == ' ' && !eoi_found && stack_ptr == 0) {
-                    //    pos = find_pos(s, buf, p - buf) + 2;
-                    //    goto end_parse;
-                    //}
-                    //break;
+                case '=':
+                    if (stack_ptr == 0 && !eoi_found)
+                        found_assignment = 1;
+                    break;
                 case ';':
                     /* level test needed for 'for(;;)' */
                     if (stack_ptr == 0) {
@@ -1164,6 +1342,10 @@ void c_indent_line(EditState *s, int offset0)
         }
     }
 
+    if (previous_decl_prefix
+    &&  c_line_has_function(cp->buf, len, cp->sbuf, flavor))
+        pos = decl_prefix_indent;
+
     for (i = 0; i < len; i++) {
         c = cp->buf[i];
         if (qe_isblank(c))
@@ -1190,14 +1372,14 @@ void c_indent_line(EditState *s, int offset0)
             pos += 3;
             break;
         }
+        if (c_line_has_label(cp->buf + i, len - i, cp->sbuf + i, flavor)) {
+            pos -= s->indent_width + s->qs->c_label_indent;
+            break;
+        }
         if (qe_isalpha_(c)) {
             if (has_else == 1 && cp->buf[i] == 'i' && cp->buf[i + 1] == 'f' && !qe_isalnum_(cp->buf[i + 2])) {
                 /* unindent if after naked else */
                 pos -= s->indent_width;
-                break;
-            }
-            if (c_line_has_label(s, cp->buf + i, len - i, cp->sbuf + i)) {
-                pos -= s->indent_width + s->qs->c_label_indent;
                 break;
             }
             break;
@@ -1223,14 +1405,8 @@ void c_indent_line(EditState *s, int offset0)
 #endif
             break;
         }
-        if (c == '{') {
-            if (pos == s->indent_width && !eoi_found) {
-                pos = 0;
-                break;
-            }
-            // XXX: need fix for GNU style
+        if (c == '{' && !block_keyword && !eoi_found && !found_assignment)
             pos -= s->indent_width;
-        }
         break;
     }
     if (pos < 0) {
@@ -1281,7 +1457,7 @@ static void do_c_indent(EditState *s)
 {
     QEmacsState *qs = s->qs;
 
-    if (!s->region_style
+    if (!qe_region_is_active(s)
     &&  !(s->b->flags & BF_PREVIEW)
     &&  qs->last_cmd_func != (CmdFunc)do_tabulate
     &&  eb_is_in_indentation(s->b, s->offset)) {

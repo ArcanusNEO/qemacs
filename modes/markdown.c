@@ -649,9 +649,7 @@ static void do_mkd_mark_element(EditState *s, int subtree)
         s->b->mark = offset;
 
     s->offset = offset1;
-    /* activate region hilite */
-    if (s->qs->hilite_region)
-        s->region_style = QE_STYLE_REGION_HILITE;
+    qe_activate_region(s);
 }
 
 static void do_mkd_insert_heading(EditState *s, int flags)
