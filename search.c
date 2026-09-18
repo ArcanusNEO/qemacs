@@ -483,7 +483,7 @@ static void isearch_run(ISearchState *is) {
     if (len == 0) {
         s->b->mark = is->saved_mark;
         s->offset = is->start_offset;
-        s->region_style = 0;
+        qe_deactivate_region(s);
         s->multi_cursor_active = 0;
         is->found_offset = -1;
     } else {
@@ -498,6 +498,7 @@ static void isearch_run(ISearchState *is) {
                       is->search_u32, is->search_u32_len,
                       search_abort_func, NULL,
                       &is->found_offset, &is->found_end) > 0) {
+            qe_deactivate_region(s);
             s->region_style = QE_STYLE_SEARCH_MATCH;
             if (is->dir >= 0) {
                 s->b->mark = is->found_offset;
@@ -776,7 +777,7 @@ static void isearch_cancel(EditState *s) {
     if (is) {
         s->b->mark = is->saved_mark;
         s->offset = is->start_offset;
-        s->region_style = 0;
+        qe_deactivate_region(s);
         s->isearch_state = NULL;
         isearch_end(is);
     }
@@ -797,7 +798,7 @@ static void isearch_exit(EditState *s, int key) {
     if (is) {
         /* exit search mode */
         s->b->mark = min_offset(is->start_offset, s->b->total_size);
-        s->region_style = 0;
+        qe_deactivate_region(s);
         put_status(s, "Mark saved where search started");
         /* repost key */
         /* do not keep search matches lingering */
@@ -1065,7 +1066,7 @@ static void query_replace_abort(QueryReplaceState *is)
     EditState *s = is->s;
 
     s->b->mark = is->start_offset;
-    s->region_style = 0;
+    qe_deactivate_region(s);
     put_status(s, "Replaced %d occurrences", is->nb_reps);
     /* Achtung: should free the grab data */
     qe_ungrab_keys(s->qs);
@@ -1123,6 +1124,7 @@ static void query_replace_run(QueryReplaceState *is)
 
     s->offset = is->found_end;
     s->b->mark = is->found_offset;
+    qe_deactivate_region(s);
     s->region_style = QE_STYLE_SEARCH_MATCH;
     do_center_cursor(s, 0);
     qe_display(s->qs);
@@ -1356,9 +1358,9 @@ void do_search_string(EditState *s, const char *search_str, int mode)
     max_offset = s->b->total_size;
     offset = s->offset;
 
-    if (s->region_style) {
+    if (qe_region_is_active(s)) {
         /* restrict the search to the current region */
-        s->region_style = 0;
+        qe_deactivate_region(s);
         min_offset = s->b->mark;
         max_offset = s->offset;
         if (min_offset > max_offset) {

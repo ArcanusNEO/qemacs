@@ -96,6 +96,10 @@ static VarDef var_table[] = {
            "Set to show non-ASCII characters as unicode escape sequences." )
     S_VAR( "default-tab-width", default_tab_width, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
            "Default value of `tab-width` for buffers that do not override it." )
+    S_VAR( "default-indent-width", default_indent_width, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
+           "Default value of `indent-width` for windows that do not override it." )
+    S_VAR( "default-indent-tabs-mode", default_indent_tabs_mode, VAR_NUMBER, VAR_RW_SAVE,
+           "Default value of `indent-tabs-mode` for windows that do not override it." )
     S_VAR( "default-fill-column", default_fill_column, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
            "Default value of `fill-column` for buffers that do not override it" )
     S_VAR( "backup-inhibited", backup_inhibited, VAR_NUMBER, VAR_RW_SAVE,

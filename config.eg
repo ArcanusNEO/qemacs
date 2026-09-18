@@ -6,6 +6,10 @@
 //
 // underscores can be used in command names instead of dash.
 //
+// Built-in defaults use 2-column tabs and indentation, spaces for
+// indentation, GNU-style C indentation, word wrapping, and no backup files.
+// Region commands operate on whole lines when the region is inactive.
+//
 
 // simple key definition
 // C-key : Control + key

@@ -154,6 +154,8 @@ C-b, left               : backward-char
 C-f, right              : forward-char
 M-b, C-left             : backward-word
 M-f, C-right            : forward-word
+M-p                     : goto-last-change
+M-n                     : goto-last-change-reverse
 M-v, prior              : scroll-down
 C-v, next               : scroll-up
 M-z                     : scroll-down-one
@@ -169,7 +171,17 @@ C-i                     : tabulate
 C-q                     : quoted-insert
 RET                     : newline
 C-o                     : open-line
+M-o                     : delete-horizontal-space
 @end example
+
+@code{goto-last-change} visits the most recent edit in the current buffer and
+then progressively older edits when repeated. @code{goto-last-change-reverse}
+moves back toward more recent edits. Changes within eight buffer positions
+are treated as one location by default; a numeric prefix changes this span.
+A negative prefix also reverses the traversal direction. Reverse traversal
+is only available after starting a change-history navigation sequence. The
+navigation cache retains the 4096 most recent changes and reports when older
+history has been truncated.
 
 @section Region handling, kill commands
 
@@ -181,9 +193,24 @@ M-C-w                   : append-next-kill
 C-k                     : kill-line
 C-w                     : kill-region
 M-w                     : copy-region
+M-\                     : duplicate-dwim
+C-\                     : copy-from-above-command
 C-y                     : yank
 M-y                     : yank-pop
 @end example
+
+With no active region, @code{kill-region} and @code{copy-region} operate on
+the current line, or on the number of lines specified by a numeric prefix.
+Text copied this way is yanked at the beginning of the current line.
+Whole-line duplicate and yank operations add a terminating newline when the
+source final line does not have one, so the inserted text remains a complete
+line.
+
+@code{duplicate-dwim} duplicates the active region or the current line and
+moves point to the first copy. A numeric prefix specifies the number of
+copies. @code{copy-from-above-command} copies text at the current column from
+the nearest nonblank line above; a numeric prefix limits the number of
+characters copied.
 
 @section Buffer and file handling
 
@@ -231,7 +258,7 @@ C-g                     : abort
 C-x u, C-_              : undo
 C-x (                   : start-kbd-macro
 C-x )                   : end-kbd-macro
-C-x e, C-\              : call-last-kbd-macro
+C-x e                   : call-last-kbd-macro
 @end example
 
 @section Window handling
@@ -301,6 +328,10 @@ All resources and configuration files are looked in the following paths:
 QEmacs tries to load a configuration file in @file{~/.qe/config}. Each
 line of the configuration file is a QEmacs command with a C like syntax
 ('-' in command name can be replaced by '_').
+
+By default, tabs and indentation are 2 columns wide, indentation uses
+spaces, C-like modes use GNU-style brace indentation, long lines wrap at
+word boundaries, and backup files are disabled.
 
 Read the example file @file{config.eg} to have some examples.
 
