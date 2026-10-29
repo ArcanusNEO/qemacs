@@ -53,10 +53,10 @@
 #endif
 
 #ifndef DEFAULT_TAB_WIDTH
-#define DEFAULT_TAB_WIDTH  4 /* used to be 8 */
+#define DEFAULT_TAB_WIDTH  2 /* used to be 8 */
 #endif
 #ifndef DEFAULT_INDENT_WIDTH
-#define DEFAULT_INDENT_WIDTH  4 /* used to be 8 */
+#define DEFAULT_INDENT_WIDTH  2 /* used to be 8 */
 #endif
 #ifndef DEFAULT_FILL_COLUMN
 #define DEFAULT_FILL_COLUMN  70
@@ -364,6 +364,7 @@ typedef struct EditBufferDataType {
 #define BF_PREVIEW   0x0008  /* used in dired mode to mark previewed files */
 #define BF_LOADING   0x0010  /* buffer is being loaded */
 #define BF_SAVING    0x0020  /* buffer is being saved */
+#define BF_YANK_WHOLE_LINES 0x0040 /* yank buffer contains whole lines */
 #define BF_DIRED     0x0100  /* buffer is interactive dired */
 #define BF_UTF8      0x0200  /* buffer charset is UTF-8 */
 #define BF_RAW       0x0400  /* buffer charset is raw (no charset translation) */
@@ -382,6 +383,13 @@ typedef struct EditBufferDataType {
 /* buffer creation flags */
 #define BC_REUSE   0x100000  /* reuse existing buffer with same name */
 #define BC_CLEAR   0x200000  /* reuse existing buffer and clear it */
+
+enum QELocalSetting {
+    QE_LOCAL_TAB_WIDTH = 1 << 0,
+    QE_LOCAL_FILL_COLUMN = 1 << 1,
+    QE_LOCAL_INDENT_WIDTH = 1 << 2,
+    QE_LOCAL_INDENT_TABS_MODE = 1 << 3,
+};
 
 struct EditBuffer {
     OWNED Page *page_table;
@@ -429,10 +437,14 @@ struct EditBuffer {
     /* undo system */
     int save_log;    /* if true, each buffer operation is logged */
     int log_new_index, log_current;
+    /* Oldest history projectable across unlogged edits. */
+    int log_history_min_index;
+    uint64_t change_count, undo_change_count, log_revision;
     enum LogOperation last_log;
     int last_log_char;
     int nb_logs;
     EditBuffer *log_buffer;
+    OWNED struct EditBufferLogSnapshot *log_snapshot;
 
     /* style system */
     EditBuffer *b_styles;
@@ -468,6 +480,9 @@ struct EditBuffer {
 
     int tab_width;
     int fill_column;
+    int user_settings; /* options explicitly set by the user */
+    int mode_settings; /* options supplied by a mode or buffer layout */
+    ModeDef *settings_mode; /* owner of the current buffer mode defaults */
     EOLType eol_type;
 
     OWNED EditBuffer *next; /* next editbuffer in qe_state buffer list */
@@ -487,15 +502,24 @@ struct EditBuffer {
      */
 };
 
-/* the log buffer is used for the undo operation */
-/* header of log operation */
-typedef struct LogBuffer {
-    u8 pad1, pad2;    /* for Log buffer readability */
-    u8 op;
-    u8 was_modified;
+typedef struct EditBufferLogEntry {
+    enum LogOperation op;
     int offset;
     int size;
-} LogBuffer;
+} EditBufferLogEntry;
+
+typedef struct EditBufferLogSnapshot {
+    uint64_t revision;
+    int count;
+    int truncated;  /* older applied entries were dropped */
+    OWNED EditBufferLogEntry *entries;
+} EditBufferLogSnapshot;
+
+enum EditBufferLogResult {
+    EB_LOG_OOM = -2,
+    EB_LOG_MALFORMED = -1,
+    EB_LOG_OK = 0,
+};
 
 void qe_trace_bytes(QEmacsState *qs, const void *buf, int size, int state);
 void qe_trace_debug(QEmacsState *qs, const char *fmt, ...) qe__attr_printf(2,3);
@@ -518,6 +542,9 @@ int eb_insert(EditBuffer *b, int offset, const void *buf, int size);
 int eb_delete(EditBuffer *b, int offset, int size);
 int eb_replace(EditBuffer *b, int offset, int size, const void *buf, int size1);
 void eb_free_log_buffer(EditBuffer *b);
+/* Buffer-owned applied history, valid until the next log mutation. */
+enum EditBufferLogResult eb_log_get_snapshot(EditBuffer *b,
+                                             const EditBufferLogSnapshot **sp);
 
 void eb_set_charset(EditBuffer *b, QECharset *charset, EOLType eol_type);
 qe__attr_nonnull((1,3))
@@ -740,6 +767,8 @@ struct EditState {
     int overwrite;          /* insert/overtype mode */
     int indent_width;       /* amount of whitespace for block indentation */
     int indent_tabs_mode;   /* if true, use tabs to indent */
+    int user_settings;      /* options explicitly set by the user */
+    int mode_settings;      /* options supplied by the mode */
     int interactive;        /* true if interaction is done instead of editing
                                (e.g. for shell mode or HTML) */
     int force_highlight;    /* if true, force showing of cursor even if
@@ -785,6 +814,7 @@ struct EditState {
     int borders_invalid; /* true if window borders should be redrawn */
     int show_selection;  /* if true, the selection is displayed */
 
+    int region_active;  /* mark defines a region, independently of highlighting */
     int region_style;
     int curline_style;
 
@@ -830,6 +860,19 @@ struct EditState {
     int multi_cursor_len;
     int multi_cursor_cur;
     int multi_cursor_active;
+    int last_yank_start;
+    int last_yank_end;
+    int last_yank_anchor;
+    int last_yank_whole_lines;
+    EditBuffer *last_change_buffer;
+    uint64_t last_change_revision;
+    int last_change_depth;
+    int last_change_span;
+    EditBuffer *change_history_buffer;
+    OWNED int *change_history_offsets;
+    OWNED u8 *change_history_states;
+    int change_history_span;
+    uint64_t change_history_revision;
 };
 
 /* Ugly patch for saving/restoring window data upon switching buffer */
@@ -991,6 +1034,13 @@ typedef struct QErrorContext {
 
 typedef void (*CmdFunc)(void);
 
+typedef struct QECommandSnapshot {
+    EditState *window;
+    EditBuffer *buffer;
+    uint64_t change_count;
+    uint64_t serial;
+} QECommandSnapshot;
+
 struct CmdDefArray {
     const struct CmdDef *array;
     int count;
@@ -1061,6 +1111,12 @@ struct QEmacsState {
     /* XXX: move these to ec */
     CmdFunc last_cmd_func; /* last executed command function call */
     CmdFunc this_cmd_func; /* current executing command */
+    CmdFunc completed_cmd_func;
+    uint64_t command_serial;
+    EditBuffer *last_cmd_buffer;
+    EditState *last_yank_window;
+    EditBuffer *last_yank_buffer;
+    int last_cmd_modified;
     int cmd_start_time;
     /* keyboard macros */
     int defining_macro;
@@ -1105,6 +1161,8 @@ struct QEmacsState {
     int mmap_threshold; /* minimum file size for mmap */
     int max_load_size;  /* maximum file size for loading in memory */
     int default_tab_width;      /* DEFAULT_TAB_WIDTH */
+    int default_indent_width;   /* DEFAULT_INDENT_WIDTH */
+    int default_indent_tabs_mode;
     int default_fill_column;    /* DEFAULT_FILL_COLUMN */
     EOLType default_eol_type;  /* EOL_UNIX */
     int flag_split_window_change_focus;
@@ -1435,6 +1493,7 @@ void do_select_input_method(EditState *s, const char *method);
 void do_switch_input_method(EditState *s);
 void qe_input_methods_init(QEmacsState *qs);
 int qe_load_input_methods(QEmacsState *qs, const char *filename);
+int qe_load_builtin_input_methods(QEmacsState *qs);
 void qe_unload_input_methods(QEmacsState *qs);
 
 /* the following will be suppressed */
@@ -1557,6 +1616,7 @@ void compute_client_area(EditState *s);
 
 /* window handling */
 void edit_close(EditState **sp);
+void edit_forget_buffer(EditState *e, EditBuffer *b);
 EditState *qe_new_window(EditBuffer *b,
                          int x1, int y1, int width, int height, int flags);
 EditBuffer *qe_check_buffer(QEmacsState *qs, EditBuffer **sp);
@@ -1691,6 +1751,9 @@ void do_bol_nspace(EditState *s);
 void do_eol(EditState *s);
 void do_word_left_right(EditState *s, int n);
 void do_mark_region(EditState *s, int mark, int offset);
+void qe_activate_region(EditState *s);
+void qe_deactivate_region(EditState *s);
+int qe_region_is_active(EditState *s);
 void do_changecase_word(EditState *s, int up);
 void do_changecase_region(EditState *s, int up);
 void do_delete_word(EditState *s, int dir);
@@ -1723,6 +1786,12 @@ void do_what_cursor_position(EditState *s);
 int find_indent(EditState *s, int offset, int pos, int *offsetp);
 int make_indent(EditState *s, int offset, int offset2, int pos, int target);
 void do_set_tab_width(EditState *s, int tab_width);
+/* Setting setters return -1 for an unknown field or an invalid value. */
+int qe_set_user_value(EditState *s, int *ptr, int value);
+int qe_set_mode_value(EditState *s, int *ptr, int value);
+int qe_set_default_value(QEmacsState *qs, int *ptr, int value);
+void eb_set_mode_tab_width(EditBuffer *b, int width);
+void eb_widen_tab_width(EditBuffer *b, int min_width);
 void do_set_indent_width(EditState *s, int indent_width);
 void do_set_indent_tabs_mode(EditState *s, int val);
 void display_window_borders(EditState *e);
@@ -1746,6 +1815,9 @@ void call_func(CmdSig sig, CmdProto func, int nb_args, CmdArg *args,
                unsigned char *args_type);
 int parse_arg(const char **pp, CmdArgSpec *ap);
 void exec_command(EditState *s, const CmdDef *d, int argval, int key);
+void qe_command_begin(QEmacsState *qs, EditState *s, CmdFunc func,
+                      QECommandSnapshot *snapshot);
+void qe_command_complete(QEmacsState *qs, const QECommandSnapshot *snapshot);
 void do_execute_command(EditState *s, const char *cmd, int argval);
 void window_display(EditState *s);
 void do_prefix_argument(EditState *s, int key);

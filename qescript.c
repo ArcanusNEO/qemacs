@@ -1006,6 +1006,14 @@ static int qe_cfg_op(QEmacsDataSource *ds, QEValue *sp, int op) {
 #endif
 
 static int qe_cfg_assign(QEmacsDataSource *ds, QEValue *sp, int op) {
+#ifndef CONFIG_TINY
+    QVarType type;
+#else
+    int *ptr;
+    int is_default = 0;
+    long long value;
+#endif
+
     if (qe_cfg_check_lvalue(ds, sp))
         return 1;
     if (qe_cfg_getvalue(ds, sp + 1))
@@ -1028,32 +1036,70 @@ static int qe_cfg_assign(QEmacsDataSource *ds, QEValue *sp, int op) {
     // XXX: should pass QEValue pointer to qe_set_variable()
 #ifndef CONFIG_TINY
     if (sp[1].type == TOK_STRING) {
-        qe_set_variable(ds->s, sp->u.str, sp[1].u.str, 0);
+        type = qe_set_variable(ds->s, sp->u.str, sp[1].u.str, 0);
     } else {
-        qe_set_variable(ds->s, sp->u.str, NULL, sp[1].u.value);
+        type = qe_set_variable(ds->s, sp->u.str, NULL, sp[1].u.value);
     }
-    // XXX: should detect and report read-only variables and invalid assignments
+    if (type == VAR_INVALID || type == VAR_READONLY || type == VAR_UNKNOWN) {
+        qe_cfg_error(ds, "cannot assign variable %s", sp->u.str);
+        return 1;
+    }
+    return 0;
 #else
-    qe_cfg_tonum(ds, sp + 1);
+    if (sp[1].type == TOK_STRING) {
+        const char *end;
+
+        errno = 0;
+        value = strtoll_c(sp[1].u.str, &end, 0);
+        if (end == sp[1].u.str || *end || errno == ERANGE)
+            goto invalid_value;
+    } else {
+        value = sp[1].u.value;
+    }
+    if (value < INT_MIN || value > INT_MAX)
+        goto invalid_value;
     if (strequal(sp->u.str, "tab-width")) {
-        ds->s->b->tab_width = sp[1].u.value;
+        ptr = &ds->s->b->tab_width;
+    } else
+    if (strequal(sp->u.str, "fill-column")) {
+        ptr = &ds->s->b->fill_column;
     } else
     if (strequal(sp->u.str, "default-tab-width")) {
-        ds->s->qs->default_tab_width = sp[1].u.value;
+        ptr = &ds->s->qs->default_tab_width;
+        is_default = 1;
+    } else
+    if (strequal(sp->u.str, "default-indent-width")) {
+        ptr = &ds->s->qs->default_indent_width;
+        is_default = 1;
+    } else
+    if (strequal(sp->u.str, "default-indent-tabs-mode")) {
+        ptr = &ds->s->qs->default_indent_tabs_mode;
+        is_default = 1;
+    } else
+    if (strequal(sp->u.str, "default-fill-column")) {
+        ptr = &ds->s->qs->default_fill_column;
+        is_default = 1;
     } else
     if (strequal(sp->u.str, "indent-tabs-mode")) {
-        ds->s->indent_tabs_mode = sp[1].u.value;
+        ptr = &ds->s->indent_tabs_mode;
     } else
     if (strequal(sp->u.str, "indent-width")) {
-        ds->s->indent_width = sp[1].u.value;
+        ptr = &ds->s->indent_width;
     } else {
         /* ignore other variables without a warning */
         qe_cfg_error(ds, "unsupported variable %s", sp->u.str);
         return 1;
     }
+    if ((is_default ? qe_set_default_value(ds->s->qs, ptr, value)
+                    : qe_set_user_value(ds->s, ptr, value)) < 0)
+        goto invalid_value;
     qe_cfg_swap(sp, sp + 1);    /* do not reload value */
-#endif
     return 0;
+
+invalid_value:
+    qe_cfg_error(ds, "invalid value for %s", sp->u.str);
+    return 1;
+#endif
 }
 
 static int qe_cfg_skip_expr(QEmacsDataSource *ds) {
@@ -1128,6 +1174,7 @@ static void qe_cfg_free_args(QEmacsDataSource *ds, int nb_args,
 
 static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
     EditState *s = ds->s;
+    QECommandSnapshot command;
     QEmacsState *qs = s->qs;
     const char *r;
     int nb_args, sep, i, ret;
@@ -1139,10 +1186,14 @@ static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
 
     /* construct argument type list */
     r = d->spec;
-    if (*r == '*') {
-        r++;
-        if (check_read_only(s))
+    while (*r == '*' || *r == '#') {
+        if (*r == '*' && check_read_only(s))
             return -1;
+        if (*r == '#' && (s->flags & (WF_POPUP | WF_MINIBUF))) {
+            qe_cfg_error(ds, "command '%s' requires a regular window", d->name);
+            return -1;
+        }
+        r++;
     }
 
     /* This argument is always the window */
@@ -1245,11 +1296,11 @@ static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
         return -1;
     }
 
-    qs->this_cmd_func = d->action.func;
+    qe_command_begin(qs, s, d->action.func, &command);
     qs->ec.function = d->name;
     call_func(d->sig, d->action, nb_args, args, args_type);
+    qe_command_complete(qs, &command);
     qs->ec.function = NULL;
-    qs->last_cmd_func = qs->this_cmd_func;
     if (qs->active_window)
         s = qs->active_window;
     qe_check_window(qs, &s);
@@ -1437,7 +1488,7 @@ static int do_eval_buffer_region(EditState *s, int start, int stop, int argval) 
 }
 
 void do_eval_region(EditState *s, int argval) {
-    s->region_style = 0;  /* deactivate region hilite */
+    qe_deactivate_region(s);
 
     do_eval_buffer_region(s, s->b->mark, s->offset, argval);
 }

@@ -31,6 +31,10 @@ static QVarType qe_variable_set_value_generic(EditState *s, VarDef *vp, void *pt
                                               const char *value, int num);
 static QVarType qe_variable_set_value_style(EditState *s, VarDef *vp, void *ptr,
                                             const char *value, int num);
+static QVarType qe_variable_set_value_local(EditState *s, VarDef *vp, void *ptr,
+                                            const char *value, int num);
+static QVarType qe_variable_set_value_default(EditState *s, VarDef *vp, void *ptr,
+                                              const char *value, int num);
 
 const char * const var_domain[] = {
     "global",   /* VAR_GLOBAL */
@@ -94,9 +98,13 @@ static VarDef var_table[] = {
            "Maximum size for files to be loaded or mmapped into a buffer." )
     S_VAR( "show-unicode", show_unicode, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
            "Set to show non-ASCII characters as unicode escape sequences." )
-    S_VAR( "default-tab-width", default_tab_width, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
+    S_VAR_F( "default-tab-width", default_tab_width, VAR_NUMBER, VAR_RW_SAVE, qe_variable_set_value_default,
            "Default value of `tab-width` for buffers that do not override it." )
-    S_VAR( "default-fill-column", default_fill_column, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
+    S_VAR_F( "default-indent-width", default_indent_width, VAR_NUMBER, VAR_RW_SAVE, qe_variable_set_value_default,
+           "Default value of `indent-width` for windows that do not override it." )
+    S_VAR_F( "default-indent-tabs-mode", default_indent_tabs_mode, VAR_NUMBER, VAR_RW_SAVE, qe_variable_set_value_default,
+           "Default value of `indent-tabs-mode` for windows that do not override it." )
+    S_VAR_F( "default-fill-column", default_fill_column, VAR_NUMBER, VAR_RW_SAVE, qe_variable_set_value_default,
            "Default value of `fill-column` for buffers that do not override it" )
     S_VAR( "backup-inhibited", backup_inhibited, VAR_NUMBER, VAR_RW_SAVE,
            "Set to prevent automatic backups of modified files" )
@@ -115,16 +123,16 @@ static VarDef var_table[] = {
            "The name of the current buffer." )
     B_VAR( "filename", filename, VAR_CHARS, VAR_RO,
            "The name of the file associated with the current buffer." )
-    B_VAR( "tab-width", tab_width, VAR_NUMBER, VAR_RW,   // XXX: need set_value function
+    B_VAR_F( "tab-width", tab_width, VAR_NUMBER, VAR_RW, qe_variable_set_value_local,
            "Distance between tab stops (for display of tab characters), in columns." )
-    B_VAR( "fill-column", fill_column, VAR_NUMBER, VAR_RW,   // XXX: need set_value function
+    B_VAR_F( "fill-column", fill_column, VAR_NUMBER, VAR_RW, qe_variable_set_value_local,
            "Column beyond which automatic line-wrapping should happen." )
 
     W_VAR_F( "point", offset, VAR_NUMBER, VAR_RW, qe_variable_set_value_offset,    /* should be window-point */
            "Current value of point in this window." )
-    W_VAR( "indent-width", indent_width, VAR_NUMBER, VAR_RW,   // XXX: need set_value function
+    W_VAR_F( "indent-width", indent_width, VAR_NUMBER, VAR_RW, qe_variable_set_value_local,
            "Number of columns to indent by for a syntactic level." )
-    W_VAR( "indent-tabs-mode", indent_tabs_mode, VAR_NUMBER, VAR_RW,
+    W_VAR_F( "indent-tabs-mode", indent_tabs_mode, VAR_NUMBER, VAR_RW, qe_variable_set_value_local,
            "Set if indentation can insert tabs." )
     W_VAR_F( "default-style", default_style, VAR_STYLE, VAR_RW, qe_variable_set_value_style,
            "Default text style for this window." )
@@ -390,8 +398,47 @@ static QVarType qe_variable_set_value_generic(EditState *s, VarDef *vp, void *pt
     return vp->type;
 }
 
+static QVarType qe_variable_set_setting(EditState *s, VarDef *vp, void *ptr,
+                                        const char *value, int num, int is_default)
+{
+    int old_value = *(int *)ptr;
+    int rc;
+
+    if (value) {
+        const char *end;
+        long n;
+
+        errno = 0;
+        n = strtol_c(value, &end, 0);
+        if (end == value || *end || errno == ERANGE || n < INT_MIN || n > INT_MAX)
+            return VAR_INVALID;
+        num = n;
+    }
+    if (is_default)
+        rc = qe_set_default_value(s->qs, ptr, num);
+    else
+        rc = qe_set_user_value(s, ptr, num);
+    if (rc < 0)
+        return VAR_INVALID;
+    if (*(int *)ptr != old_value)
+        vp->modified = 1;
+    return VAR_NUMBER;
+}
+
+static QVarType qe_variable_set_value_local(EditState *s, VarDef *vp, void *ptr,
+                                            const char *value, int num)
+{
+    return qe_variable_set_setting(s, vp, ptr, value, num, 0);
+}
+
+static QVarType qe_variable_set_value_default(EditState *s, VarDef *vp, void *ptr,
+                                              const char *value, int num)
+{
+    return qe_variable_set_setting(s, vp, ptr, value, num, 1);
+}
+
 QVarType qe_set_variable(EditState *s, const char *name,
-                         const char *value, int num)
+                         const char *value, long long num)
 {
     QEmacsState *qs = s->qs;
     void *ptr;
@@ -420,6 +467,11 @@ QVarType qe_set_variable(EditState *s, const char *name,
     if (vp->rw == VAR_RO) {
         return VAR_READONLY;
     } else {
+        /* Reject overflow before narrowing integer settings. */
+        if (!value && (num < INT_MIN || num > INT_MAX)
+        &&  (vp->set_value == qe_variable_set_value_local
+         ||  vp->set_value == qe_variable_set_value_default))
+            return VAR_INVALID;
         switch (vp->domain) {
         case VAR_SELF:
             ptr = &vp->value;
@@ -644,10 +696,10 @@ int eb_variable_print_entry(EditBuffer *b, VarDef *vp, EditState *s, int long_fo
         }
     } else {
         if (len + 2 <= 40) {
-            b->tab_width = max_int(len + 2, b->tab_width);
+            eb_widen_tab_width(b, len + 2);
             len += eb_putc(b, '\t');
         } else {
-            b->tab_width = 40;
+            eb_set_mode_tab_width(b, 40);
         }
         len += eb_style_printf(b, QE_STYLE_COMMENT, "  %s%s",
                                vp->rw ? "" : "read-only ", var_domain[vp->domain]);

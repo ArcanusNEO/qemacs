@@ -170,7 +170,7 @@ static void bufed_build_list(EditState *s, BufedState *bs)
     eb_clear(b);
 
     line = 0;
-    b->tab_width = 20;
+    eb_set_mode_tab_width(b, 20);
     for (i = 0; i < bs->items.nb_items; i++) {
         char flags[4];
         char *flagp = flags;
@@ -203,7 +203,7 @@ static void bufed_build_list(EditState *s, BufedState *bs)
         eb_style_printf(b, style0, "%3s", flags);
         b->cur_style = BUFED_STYLE_BUFNAME;
         len = eb_put_filename(b, item->str, bs->pf_flags);
-        b->tab_width = max_int(3 + len + 2, b->tab_width);
+        eb_widen_tab_width(b, 3 + len + 2);
         eb_putc(b, '\t');
         if (b1) {
             char path[MAX_FILENAME_SIZE];
@@ -722,7 +722,7 @@ int buffer_print_entry(CompleteState *cp, EditState *s, const char *name)
     if (b1) {
         b->cur_style = QE_STYLE_KEYWORD;
         len = eb_put_filename(b, b1->name, bufed_pf_flags);
-        b->tab_width = max3_int(16, len + 3, b->tab_width);
+        eb_widen_tab_width(b, max_int(16, len + 3));
         len += eb_putc(b, '\t');
         if (*b1->filename) {
             b->cur_style = QE_STYLE_COMMENT;

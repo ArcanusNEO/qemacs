@@ -1050,7 +1050,7 @@ static void do_fractal_help(EditState *s)
 
     eb_style_puts(b, DESCRIBE_STYLE_HEAD, "Fractal description:\n\n");
 
-    b->tab_width = 16;
+    eb_set_mode_tab_width(b, 16);
     eb_print_field(b, "type", "%s\n", fractal_type[ms->type].name);
     eb_print_field(b, "formula", "%s\n", fractal_type[ms->type].formula);
     eb_print_field(b, "x", ""MFT"\n", ms->x);

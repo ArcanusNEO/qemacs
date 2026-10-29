@@ -23,8 +23,16 @@
  * THE SOFTWARE.
  */
 
+#include <limits.h>
+
+#ifdef HAVE_QE_CONFIG_H
+#include "config.h"
+#endif
 #include "util.h"
 #include "unicode_join.h"
+#ifdef CONFIG_BUILTIN_RESOURCES
+#include "builtin-ligatures.h"
+#endif
 
 /*---- ligature tables ----*/
 
@@ -35,59 +43,66 @@ static unsigned short *ligature_long;
 static unsigned short subst1_count;
 static unsigned short ligature2_count;
 
-static int uni_get_be16(FILE *f, unsigned short *pv) {
-    /* read a big-endian unsigned 16-bit value from `f` into `*pv` */
-    /* return -1 if end of file */
-    int c1, c2;
-    if ((c1 = fgetc(f)) != EOF && (c2 = fgetc(f)) != EOF) {
-        *pv = (c1 << 8) | c2;
-        return 0;
-    } else {
-        return 1;
-    }
+static unsigned short uni_get_be16(const unsigned char **pp) {
+    const unsigned char *p = *pp;
+
+    *pp += 2;
+    return (p[0] << 8) | p[1];
 }
 
-static unsigned short *read_array_be16(FILE *f, int n) {
+static unsigned short *read_array_be16(const unsigned char **pp, int n) {
     unsigned short *tab;
     int i;
 
     tab = qe_malloc_array(unsigned short, n);
     if (!tab)
         return NULL;
-    for (i = 0; i < n; i++) {
-        if (uni_get_be16(f, &tab[i])) {
-            qe_free(&tab);
-            return NULL;
-        }
-    }
+    for (i = 0; i < n; i++)
+        tab[i] = uni_get_be16(pp);
     return tab;
 }
 
-int load_ligatures(const char *filename) {
-    FILE *f;
-    unsigned char sig[4];
+static int load_ligatures_data(const unsigned char *data, size_t size) {
+    const unsigned char *p;
     unsigned short long_count;
 
-    f = fopen(filename, "r");
-    if (!f)
+    if (size < 10 || memcmp(data, "liga", 4) != 0)
         return -1;
 
-    if (fread(sig, 1, 4, f) != 4
-    ||  memcmp(sig, "liga", 4) != 0
-    ||  uni_get_be16(f, &subst1_count)
-    ||  uni_get_be16(f, &ligature2_count)
-    ||  uni_get_be16(f, &long_count)
-    ||  !(subst1 = read_array_be16(f, subst1_count * 2))
-    ||  !(ligature2 = read_array_be16(f, ligature2_count * 3))
-    ||  !(ligature_long = read_array_be16(f, long_count))) {
+    unload_ligatures();
+    p = data + 4;
+    subst1_count = uni_get_be16(&p);
+    ligature2_count = uni_get_be16(&p);
+    long_count = uni_get_be16(&p);
+    if (size - 10 < 2 * (size_t)(subst1_count * 2
+                             + ligature2_count * 3 + long_count)
+    ||  !(subst1 = read_array_be16(&p, subst1_count * 2))
+    ||  !(ligature2 = read_array_be16(&p, ligature2_count * 3))
+    ||  !(ligature_long = read_array_be16(&p, long_count))) {
         unload_ligatures();
-        fclose(f);
         return -1;
-    } else {
-        fclose(f);
-        return 0;
     }
+    return 0;
 }
+
+int load_ligatures(const char *filename) {
+    char *data;
+    int size, ret;
+
+    data = file_load(filename, INT_MAX, &size);
+    if (!data)
+        return -1;
+    ret = load_ligatures_data((const unsigned char *)data, size);
+    qe_free(&data);
+    return ret;
+}
+
+#ifdef CONFIG_BUILTIN_RESOURCES
+int load_builtin_ligatures(void) {
+    return load_ligatures_data(qe_builtin_ligatures,
+                               sizeof(qe_builtin_ligatures));
+}
+#endif
 
 void unload_ligatures(void) {
     qe_free(&subst1);

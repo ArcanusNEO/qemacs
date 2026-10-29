@@ -109,7 +109,7 @@ int variable_print_entry(CompleteState *cp, EditState *s, const char *name);
 QVarType qe_get_variable(EditState *s, const char *name,
                          char *buf, int size, int *pnum, int as_source);
 QVarType qe_set_variable(EditState *s, const char *name,
-                         const char *value, int num);
+                         const char *value, long long num);
 
 void qe_list_variables(EditState *s, EditBuffer *b);
 

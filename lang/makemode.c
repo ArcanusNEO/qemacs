@@ -140,8 +140,8 @@ static int makefile_mode_init(EditState *s, EditBuffer *b, int flags)
 {
     if (s) {
         /* XXX: should use the default values from mode variables */
-        s->b->tab_width = 8;
-        s->indent_tabs_mode = 1;
+        qe_set_mode_value(s, &s->b->tab_width, 8);
+        qe_set_mode_value(s, &s->indent_tabs_mode, 1);
     }
     return 0;
 }

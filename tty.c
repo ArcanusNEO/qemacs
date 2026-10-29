@@ -2175,7 +2175,7 @@ static void tty_dpy_describe(QEditScreen *s, EditBuffer *b)
 {
     TTYState *ts = s->priv_data;
 
-    b->tab_width = 20;
+    eb_set_mode_tab_width(b, 20);
     eb_style_puts(b, DESCRIBE_STYLE_HEAD, "\nDevice description:\n\n");
 
     if (ts->term_name)

@@ -379,8 +379,8 @@ static int bazel_mode_init(EditState *s, EditBuffer *b, int flags)
 {
     if (s) {
         /* XXX: should use the default values from mode variables */
-        s->indent_tabs_mode = 0;
-        s->indent_width = 2;
+        qe_set_mode_value(s, &s->indent_tabs_mode, 0);
+        qe_set_mode_value(s, &s->indent_width, 2);
     }
     return 0;
 }
