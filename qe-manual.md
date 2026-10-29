@@ -229,7 +229,7 @@ The commands are recorded even as they are executed.
 Use `end-kbd-macro` (bound to `C-x )`) to finish recording and
 make the macro available.
 Use `name-last-kbd-macro` to give it a permanent name.
-Use `call-last-kbd-macro` (bound to `C-x e` or `C-\`) to replay
+Use `call-last-kbd-macro` (bound to `C-x e`) to replay
 the keystrokes.
 
 # Implementation

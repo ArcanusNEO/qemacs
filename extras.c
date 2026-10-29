@@ -549,12 +549,12 @@ void do_delete_horizontal_space(EditState *s, int mode)
     EditBuffer *b = s->b;
 
     stop = from = s->offset;
-    if (s->region_style) {
+    if (qe_region_is_active(s)) {
         if (mode == DH_FULL)
             mode = DH_EOL;
         from = min_int(b->mark, s->offset);
         stop = max_int(b->mark, s->offset);
-        s->region_style = 0;
+        qe_deactivate_region(s);
     } else
     if (mode == DH_FULL) {
         from = 0;
@@ -653,7 +653,7 @@ static void do_tabify(EditState *s, int p1, int p2)
     int offset, offset1, offset2, delta;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     col = 0;
     offset = eb_goto_bol(b, start);
@@ -699,7 +699,7 @@ static void do_tabify(EditState *s, int p1, int p2)
 static void do_tabify_buffer(EditState *s)
 {
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     eb_tabify(s->b, 0, s->b->total_size);
 }
@@ -707,7 +707,7 @@ static void do_tabify_buffer(EditState *s)
 static void do_tabify_region(EditState *s)
 {
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     eb_tabify(s->b, s->b->mark, s->offset);
 }
@@ -726,7 +726,7 @@ static void do_untabify(EditState *s, int p1, int p2)
     int offset, offset1, offset2, delta;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     col = 0;
     offset = eb_goto_bol(b, start);
@@ -759,7 +759,7 @@ static void do_untabify(EditState *s, int p1, int p2)
 static void do_untabify_buffer(EditState *s)
 {
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     eb_untabify(s->b, 0, s->b->total_size);
 }
@@ -767,7 +767,7 @@ static void do_untabify_buffer(EditState *s)
 static void do_untabify_region(EditState *s)
 {
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     eb_untabify(s->b, s->b->mark, s->offset);
 }
@@ -781,7 +781,7 @@ static void do_indent_rigidly(EditState *s, int start, int end, int argval)
         /* enter interactive mode */
         QEmacsState *qs = s->qs;
         if (!qs->first_transient_key) {
-            s->region_style = QE_STYLE_REGION_HILITE;
+            qe_activate_region(s);
             put_status(s, "Indent the region interactively with TAB, left, right, S-left, S-right");
             qe_register_transient_binding(qs, "indent-rigidly-left", "left");
             qe_register_transient_binding(qs, "indent-rigidly-right", "right");
@@ -798,7 +798,7 @@ static void do_indent_region(EditState *s, int start, int end, int argval)
     int col_num, line, line1, line2;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     if (argval < 0 || !s->mode->indent_func
     ||  s->qs->last_cmd_func == (CmdFunc)do_indent_region) {
@@ -1467,7 +1467,7 @@ static void print_bindings(EditBuffer *b, ModeDef *mode)
 
     start = 0;
     gfound = 0;
-    b->tab_width = 24;
+    eb_set_mode_tab_width(b, 24);
     for (i = 0; i < qs->cmd_array_count; i++) {
         for (j = qs->cmd_array[i].count, d = qs->cmd_array[i].array; j-- > 0; d++) {
             if (qe_list_bindings(qs, d, mode, 0, buf, sizeof(buf))) {
@@ -1557,7 +1557,7 @@ static void wall_chart_prefix(EditState *s, const char *prefix, int argval)
     if (!b)
         return;
 
-    b->tab_width = 16;
+    eb_set_mode_tab_width(b, 16);
     if (argval != 1) {
         // make a complete wall chart with all modes
         mode_wall_chart(b, NULL, NULL, prefix, TRUE);
@@ -2087,7 +2087,7 @@ static void do_set_region_color(EditState *s, const char *str)
     QETermStyle style;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     if (qe_term_style_parse(&style, str)) {
         put_error(s, "Invalid color '%s'", str);
@@ -2146,7 +2146,7 @@ static void do_set_region_style(EditState *s, const char *str)
     QETermStyle style;
 
     /* deactivate region hilite */
-    s->region_style = 0;
+    qe_deactivate_region(s);
 
     if (qe_term_style_parse(&style, str)) {
         put_error(s, "Invalid style '%s'", str);
@@ -2189,7 +2189,7 @@ static void do_describe_buffer(EditState *s, int argval)
 
     eb_style_puts(b1, DESCRIBE_STYLE_HEAD, "Buffer fields:\n");
 
-    b1->tab_width = 12;
+    eb_set_mode_tab_width(b1, 12);
     eb_print_field(b1, "name", "%s\n", b->name);
     eb_print_field(b1, "filename", "%s\n", b->filename);
     eb_print_field(b1, "modified", "%d\n", b->modified);
@@ -2399,7 +2399,7 @@ static void do_describe_window(EditState *s, int argval)
 
     eb_style_puts(b1, DESCRIBE_STYLE_HEAD, "Window fields:\n");
 
-    b1->tab_width = 28;
+    eb_set_mode_tab_width(b1, 28);
     eb_print_field(b1, "xleft, ytop", "%d, %d\n", s->xleft, s->ytop);
     eb_print_field(b1, "width, height", "%d, %d\n", s->width, s->height);
     eb_print_field(b1, "x1, y1, x2, y2", "%d, %d, %d, %d\n", s->x1, s->y1, s->x2, s->y2);
@@ -2480,6 +2480,7 @@ static void do_describe_window(EditState *s, int argval)
     eb_print_field(b1, "display_invalid", "%d\n", s->display_invalid);
     eb_print_field(b1, "borders_invalid", "%d\n", s->borders_invalid);
     eb_print_field(b1, "show_selection", "%d\n", s->show_selection);
+    eb_print_field(b1, "region_active", "%d\n", s->region_active);
     eb_print_field(b1, "region_style", "%d\n", s->region_style);
     eb_print_field(b1, "curline_style", "%d\n", s->curline_style);
     eb_putc(b1, '\n');
@@ -2498,7 +2499,7 @@ static void do_describe_screen(EditState *e, int argval)
 
     eb_style_puts(b1, DESCRIBE_STYLE_HEAD, "\nScreen fields:\n\n");
 
-    b1->tab_width = 20;
+    eb_set_mode_tab_width(b1, 20);
     eb_print_field(b1, "dpy.name", "%s\n", s->dpy.name);
     eb_print_field(b1, "width, height", "%d, %d\n", s->width, s->height);
     eb_print_field(b1, "charset", "%s\n", s->charset->name);
@@ -2772,7 +2773,7 @@ done:
 }
 
 static void do_sort_span(EditState *s, int p1, int p2, int argval, int flags) {
-    s->region_style = 0;
+    qe_deactivate_region(s);
     if (eb_sort_span(s->b, &p1, &p2, s->offset, flags | argval) < 0) {
         put_error(s, "Out of memory");
         return;
@@ -3024,7 +3025,7 @@ static int charname_print_entry(CompleteState *cp, EditState *s, const char *nam
     if (p != NULL) {
         char cbuf[MAX_CHAR_BYTES + 1];
         char32_t code = strtol(p + 1, NULL, 16);
-        s->b->tab_width = max_int(s->b->tab_width, min_int(60, 2 + (p - name)));
+        eb_widen_tab_width(s->b, min_int(60, 2 + (p - name)));
         return eb_printf(s->b, "%s  %s", name,
                          utf8_char32_to_string(cbuf, code));
     } else {
@@ -3079,7 +3080,7 @@ static int eb_print_color(EditBuffer *b, const char *name) {
         rgb = qe_unmap_color(bg, 8192);
     }
     len = eb_style_puts(b, QE_STYLE_FUNCTION, name);
-    b->tab_width = max_int(b->tab_width, len + 2);
+    eb_widen_tab_width(b, len + 2);
     eb_putc(b, '\t');
     len += 1;
     len += eb_printf(b, " %-10s ", alt_name);
@@ -3108,7 +3109,7 @@ int style_print_entry(CompleteState *cp, EditState *s, const char *name) {
     int show_sample = 0;
 
     len = eb_style_puts(b, QE_STYLE_FUNCTION, name);
-    b->tab_width = max_int(b->tab_width, len + 2);
+    eb_widen_tab_width(b, len + 2);
     if ((stp = find_style(name, &index)) != NULL) {
         style = index;
         qe_styledef_string(buf, countof(buf), stp);
@@ -3138,7 +3139,7 @@ static void do_list_styles(EditState *s, int argval) {
     start = b->offset;
     for (i = 0; i < QE_STYLE_NB; i++) {
         len = eb_style_puts(b, QE_STYLE_FUNCTION, qe_styles[i].name);
-        b->tab_width = max_int(b->tab_width, len + 2);
+        eb_widen_tab_width(b, len + 2);
         eb_putc(b, '\t');
         eb_printf(b, "%2d  ", i);
         eb_style_puts(b, i, "[  Sample  ]");
@@ -3299,7 +3300,7 @@ void do_mark_paragraph(EditState *s, int n) {
      */
     int start = s->offset;
     int end = s->b->mark;
-    if (!s->region_style) {
+    if (!qe_region_is_active(s)) {
         if (n < 0) {
             end = eb_prev_paragraph(s->b, start);
             start = eb_next_paragraph(s->b, end);
@@ -3403,7 +3404,7 @@ void do_fill_paragraph(EditState *s, int mode, int argval)
     int col, indent0_size, indent_size, word_size, nb;
 
     par_start = end = s->offset;
-    if (mode == 1 || mode == 3 || s->region_style) {
+    if (mode == 1 || mode == 3 || qe_region_is_active(s)) {
         par_start = min_offset(b->mark, s->offset);
         end = max_offset(b->mark, s->offset);
     }
@@ -3615,7 +3616,7 @@ void do_mark_sentence(EditState *s, int n) {
        the next ARG sentences after the ones already marked.
      */
     int start = s->offset;
-    int end = s->region_style ? s->b->mark : s->offset;
+    int end = qe_region_is_active(s) ? s->b->mark : s->offset;
     end = eb_skip_sentences(s->b, end, n);
     do_mark_region(s, end, start);
 }
@@ -3683,7 +3684,7 @@ static const CmdDef extra_commands[] = {
     CMD3( "delete-trailing-whitespace", "", // (emacs)
           "Delete all the trailing whitespace across the current buffer",
           do_delete_horizontal_space, ESi, "*" "v", DH_FULL)
-    CMD3( "delete-horizontal-space", "M-\\",
+    CMD3( "delete-horizontal-space", "M-o",
           "Delete blanks around point",
           do_delete_horizontal_space, ESi, "*", DH_POINT)
     CMD2( "delete-blank-lines", "C-x C-o",

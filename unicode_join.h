@@ -27,6 +27,7 @@
 #define UNICODE_JOIN_H
 
 int load_ligatures(const char *filename);
+int load_builtin_ligatures(void);
 void unload_ligatures(void);
 int combine_accent(char32_t *buf, char32_t c, char32_t accent);
 int expand_ligature(char32_t *buf, char32_t c);

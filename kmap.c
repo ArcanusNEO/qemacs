@@ -24,6 +24,9 @@
  */
 
 #include "qe.h"
+#ifdef CONFIG_BUILTIN_RESOURCES
+#include "builtin-kmaps.h"
+#endif
 #ifdef CONFIG_MMAP
 #include <sys/mman.h>
 #endif
@@ -166,6 +169,57 @@ static int kmap_input(int *match_buf, int match_buf_size,
     }
 }
 
+static int qe_load_input_methods_data(QEmacsState *qs,
+                                      const unsigned char *file_ptr,
+                                      size_t file_size)
+{
+    const unsigned char *p, *end = file_ptr + file_size, *name_end;
+    unsigned int offset;
+    InputMethod *m;
+
+    if (file_size < 8 || memcmp(file_ptr, "kmap", 4) != 0)
+        return -1;
+
+    /* Validate the directory before registering pointers into the data. */
+    p = file_ptr + 4;
+    for (;;) {
+        if (end - p < 4)
+            return -1;
+        offset = ((unsigned int)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+        p += 4;
+        if (offset == 0)
+            break;
+        if (offset >= file_size || !(name_end = memchr(p, 0, end - p)))
+            return -1;
+        p = name_end + 1;
+    }
+
+    p = file_ptr + 4;
+    for (;;) {
+        offset = ((unsigned int)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+        p += 4;
+        if (offset == 0)
+            break;
+        m = qe_mallocz(InputMethod);
+        if (m) {
+            m->data = file_ptr + offset;
+            m->input_match = kmap_input;
+            m->name = (const char *)p;
+            qe_register_input_method(qs, m);
+        }
+        p += strlen((const char *)p) + 1;
+    }
+    return 0;
+}
+
+#ifdef CONFIG_BUILTIN_RESOURCES
+int qe_load_builtin_input_methods(QEmacsState *qs)
+{
+    return qe_load_input_methods_data(qs, qe_builtin_kmaps,
+                                      sizeof(qe_builtin_kmaps));
+}
+#endif
+
 #ifdef CONFIG_MMAP
 static void *input_method_map;
 static size_t input_method_size;
@@ -175,9 +229,8 @@ static void *input_method_ptr;
 int qe_load_input_methods(QEmacsState *qs, const char *filename)
 {
     ssize_t file_size;
-    int fd, offset;
-    const unsigned char *file_ptr = NULL, *p;
-    InputMethod *m;
+    int fd;
+    const unsigned char *file_ptr = NULL;
 
     // O_BINARY? should just use fopen()
     fd = open(filename, O_RDONLY);
@@ -205,25 +258,10 @@ int qe_load_input_methods(QEmacsState *qs, const char *filename)
         }
     }
 
-    if (memcmp(file_ptr, "kmap", 4) != 0)
+    if (qe_load_input_methods_data(qs, file_ptr, file_size) < 0)
         goto fail;
 
-    p = file_ptr + 4;
-    for (;;) {
-        offset = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
-        p += 4;
-        if (offset == 0)
-            break;
-        /* Should add validation tests */
-        m = qe_mallocz(InputMethod);
-        if (m) {
-            m->data = file_ptr + offset;
-            m->input_match = kmap_input;
-            m->name = (const char*)p;
-            qe_register_input_method(qs, m);
-        }
-        p += strlen((const char *)p) + 1;
-    }
+    close(fd);
     return 0;
 
   fail:

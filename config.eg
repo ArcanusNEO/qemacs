@@ -6,6 +6,20 @@
 //
 // underscores can be used in command names instead of dash.
 //
+// Built-in defaults use 2-column tabs and indentation, spaces for
+// indentation, GNU-style C indentation, word wrapping, and no backup files.
+// Region commands operate on whole lines when the region is inactive.
+//
+// Changing a default updates existing buffers/windows that still inherit it.
+// Mode defaults override global defaults; explicit local settings override both.
+// Switching major modes resets old mode defaults, but keeps local settings.
+//default_tab_width = 4;       // at least 1
+//default_indent_width = 4;    // at least 1
+//default_indent_tabs_mode = 0;
+//default_fill_column = 80;    // at least 2
+//set_tab_width(8);            // local to the current buffer
+//set_indent_width(4);         // local to the current window's buffer state
+//
 
 // simple key definition
 // C-key : Control + key

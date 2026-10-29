@@ -649,9 +649,7 @@ static void do_mkd_mark_element(EditState *s, int subtree)
         s->b->mark = offset;
 
     s->offset = offset1;
-    /* activate region hilite */
-    if (s->qs->hilite_region)
-        s->region_style = QE_STYLE_REGION_HILITE;
+    qe_activate_region(s);
 }
 
 static void do_mkd_insert_heading(EditState *s, int flags)
@@ -895,8 +893,8 @@ static const CmdDef mkd_commands[] = {
 static int mkd_mode_init(EditState *s, EditBuffer *b, int flags)
 {
     if (s) {
-        s->b->tab_width = 4;
-        s->indent_tabs_mode = 0;
+        qe_set_mode_value(s, &s->b->tab_width, 4);
+        qe_set_mode_value(s, &s->indent_tabs_mode, 0);
         /* XXX: should come from mode.default_wrap */
         s->wrap = WRAP_WORD;
     }
@@ -921,8 +919,8 @@ static ModeDef mdx_mode = {
 static int litcoffee_mode_init(EditState *s, EditBuffer *b, int flags)
 {
     if (s) {
-        s->b->tab_width = 4;
-        s->indent_tabs_mode = 0;
+        qe_set_mode_value(s, &s->b->tab_width, 4);
+        qe_set_mode_value(s, &s->indent_tabs_mode, 0);
         /* XXX: should come from mode.default_wrap */
         s->wrap = WRAP_WORD;
         s->mode->colorize_flags = mkd_add_lang(s->qs, "coffee", 0);

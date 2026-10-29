@@ -88,6 +88,7 @@ doc="yes"
 plugins="yes"
 mmap="yes"
 kmaps="yes"
+builtin_resources="no"
 modes="yes"
 bidir="yes"
 exe=""
@@ -249,6 +250,7 @@ echo "  --disable-html           disable graphical html support"
 echo "  --disable-png            disable png support"
 echo "  --disable-plugins        disable plugins support"
 echo "  --disable-ffmpeg         disable ffmpeg support"
+echo "  --enable-builtin-resources embed kmaps and ligatures in the executable"
 echo "  --tiny-only              only build the very small version"
 echo "  --with-ffmpegdir=DIR     find ffmpeg sources and libraries in DIR"
 echo "                           for audio/video/image support"
@@ -372,6 +374,9 @@ for opt do
         ;;
       --enable-ffmpeg | --disable-ffmpeg)
         ffmpeg="$value"
+        ;;
+      --enable-builtin-resources | --disable-builtin-resources)
+        builtin_resources="$value"
         ;;
       --enable-* | --disable-*)
         echo "unknown option: $opt"
@@ -590,6 +595,7 @@ echo "Unlocked I/O        $unlockio"
 echo "Plugins support     $plugins"
 echo "Bidir support       $bidir"
 echo "All kmaps           $kmaps"
+echo "Builtin resources   $builtin_resources"
 echo "All modes           $modes"
 echo "Build doc files     $doc"
 echo ""
@@ -767,6 +773,11 @@ fi
 if test "$kmaps" = "yes" ; then
   echo "#define CONFIG_ALL_KMAPS 1" >> $TMPH
   echo "CONFIG_ALL_KMAPS=yes" >> $TMPMAK
+fi
+
+if test "$builtin_resources" = "yes" ; then
+  echo "#define CONFIG_BUILTIN_RESOURCES 1" >> $TMPH
+  echo "CONFIG_BUILTIN_RESOURCES=yes" >> $TMPMAK
 fi
 
 if test "$mmap" = "yes" ; then

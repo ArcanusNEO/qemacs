@@ -476,9 +476,7 @@ static void do_org_mark_element(EditState *s, int subtree)
         s->b->mark = offset;
 
     s->offset = offset1;
-    /* activate region hilite */
-    if (s->qs->hilite_region)
-        s->region_style = QE_STYLE_REGION_HILITE;
+    qe_activate_region(s);
 }
 
 static void do_org_todo(EditState *s)

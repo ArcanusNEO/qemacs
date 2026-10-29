@@ -396,6 +396,22 @@ $(OBJS_DIR)/modes/stb.o: modes/stb.c modes/stb_image.h
 $(OBJS_DIR)/libunicode.o: libunicode.c libunicode.h libunicode-table.h
 $(OBJS_DIR)/libregexp.o: libregexp.c libregexp.h libregexp-opcode.h
 
+ifdef CONFIG_BUILTIN_RESOURCES
+ifndef TARGET_TINY
+ifdef CONFIG_ALL_KMAPS
+$(OBJS_DIR)/kmap.o: $(OBJS_DIR)/builtin-kmaps.h
+endif
+ifdef CONFIG_UNICODE_JOIN
+$(OBJS_DIR)/unicode_join.o: $(OBJS_DIR)/builtin-ligatures.h
+endif
+
+$(OBJS_DIR)/builtin-%.h: % $(BINDIR)/bintoqe$(EXE)
+	$(echo) GEN $@
+	$(cmd)  mkdir -p $(dir $@)
+	$(cmd)  $(BINDIR)/bintoqe$(EXE) $< qe_builtin_$* > $@.tmp.$$$$ && mv $@.tmp.$$$$ $@
+endif
+endif
+
 $(OBJS_DIR)/%.o: %.c $(DEPENDS) Makefile
 	$(echo) CC $(ECHO_CFLAGS) -c $<
 	$(cmd)  mkdir -p $(dir $@)
@@ -421,6 +437,8 @@ libqhtml: force
 #
 # Host utilities
 #
+$(BINDIR)/bintoqe$(EXE): tools/bintoqe.c
+
 $(BINDIR)/%$(EXE): tools/%.c
 	$(echo) CC -o $@ $^
 	$(cmd)  mkdir -p $(dir $@)
@@ -628,7 +646,9 @@ endif
 ifdef CONFIG_FFMPEG
 	ln -sf qemacs$(EXE) $(DESTDIR)$(prefix)/bin/ffplay$(EXE)
 endif
+ifndef CONFIG_BUILTIN_RESOURCES
 	$(INSTALL) -m 644 kmaps ligatures $(DESTDIR)$(datadir)/qe
+endif
 	$(INSTALL) -m 644 qe.1 $(DESTDIR)$(mandir)/man1
 ifdef CONFIG_HTML
 	$(INSTALL) -m 755 -s html2png$(EXE) $(DESTDIR)$(prefix)/bin

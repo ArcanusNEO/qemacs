@@ -2027,7 +2027,7 @@ int file_print_entry(CompleteState *cp, EditState *s, const char *name) {
     if (!stat(name, &st)) {
         b->cur_style = S_ISDIR(st.st_mode) ? QE_STYLE_DIRED_DIRECTORY : QE_STYLE_DIRED_FILENAME;
         len = eb_put_filename(b, name, dired_pf_flags);
-        b->tab_width = max3_int(16, len + 2, b->tab_width);
+        eb_widen_tab_width(b, max_int(16, len + 2));
         b->cur_style = QE_STYLE_DIRED_DEFAULT;
         format_size(buf, sizeof(buf), dired_hflag, st.st_mode, st.st_dev, st.st_size);
         len += eb_printf(b, "\t%*s", sizelen, buf);
@@ -2063,7 +2063,7 @@ int shellcmd_print_entry(CompleteState *cp, EditState *s, const char *name)
         b->cur_style = QE_STYLE_DIRED_FILENAME;
 
     len = eb_put_filename(b, name, dired_pf_flags);
-    b->tab_width = max3_int(16, len + 2, b->tab_width);
+    eb_widen_tab_width(b, max_int(16, len + 2));
     b->cur_style = QE_STYLE_DIRED_DEFAULT;
 
     return len;
